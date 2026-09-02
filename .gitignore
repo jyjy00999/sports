@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# 임시 파일
+tsc_err.txt
+tsc_out.txt
+
+# Claude Code 설정
+.claude/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
