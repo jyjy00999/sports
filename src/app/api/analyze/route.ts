@@ -270,32 +270,46 @@ export async function POST(req: Request) {
       const isHomeFavorable = hcHomeOdds !== null && hcHomeOdds < mwHomeOdds; // 핸디 홈배당 < 승무패 홈배당 → 홈유리
       const isAwayFavorable = hcHomeOdds !== null && hcHomeOdds > mwHomeOdds; // 핸디 홈배당 > 승무패 홈배당 → 원정유리
 
+      const drawPct = result.draw_pct ?? 0;
+
       if (isHomeFavorable && result.handicap_away_pct != null && result.handicap_home_pct != null) {
         // H+ (홈유리): 핸디 원정 승률 반드시 < 승무패 원정 승률
         if (result.handicap_away_pct >= result.away_win_pct) {
-          const corrected = Math.max(1, Math.round(result.away_win_pct * 0.45)); // 전체의 45% 이하로
+          const corrected = Math.max(1, Math.round(result.away_win_pct * 0.45));
           const diff = result.handicap_away_pct - corrected;
-          console.log(`[Analyze] 핸디 교정(홈유리): 핸디원정${result.handicap_away_pct}% → ${corrected}% (승무패원정${result.away_win_pct}% 초과 불가)`);
+          console.log(`[Analyze] 핸디 교정(홈유리-원정과다): 핸디원정${result.handicap_away_pct}% → ${corrected}%`);
           result.handicap_away_pct = corrected;
           result.handicap_home_pct = Math.min(99, result.handicap_home_pct + diff);
-          // 합계 100 맞추기
-          const total = result.handicap_home_pct + (result.handicap_draw_pct ?? 0) + result.handicap_away_pct;
-          if (total !== 100) {
-            result.handicap_home_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_away_pct;
-          }
+          result.handicap_home_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_away_pct;
+        }
+        // H+ (홈유리): 핸디 홈 승률 반드시 ≥ 승무패 홈 승률 (홈이 유리하므로)
+        if (result.handicap_home_pct < result.home_win_pct) {
+          const target = Math.min(98, result.home_win_pct + Math.round(drawPct * 0.5));
+          const diff = target - result.handicap_home_pct;
+          console.log(`[Analyze] 핸디 교정(홈유리-홈부족): 핸디홈${result.handicap_home_pct}% → ${target}%`);
+          result.handicap_home_pct = target;
+          result.handicap_away_pct = Math.max(1, result.handicap_away_pct - Math.round(diff * 0.7));
+          result.handicap_draw_pct = Math.max(0, 100 - result.handicap_home_pct - result.handicap_away_pct);
         }
       } else if (isAwayFavorable && result.handicap_home_pct != null && result.handicap_away_pct != null) {
-        // H- (원정유리): 핸디 홈 승률 반드시 < 승무패 홈 승률
+        // H- (원정유리): 핸디 홈 승률 반드시 < 승무패 홈 승률 (홈이 불리하므로)
         if (result.handicap_home_pct >= result.home_win_pct) {
           const corrected = Math.max(1, Math.round(result.home_win_pct * 0.45));
           const diff = result.handicap_home_pct - corrected;
-          console.log(`[Analyze] 핸디 교정(원정유리): 핸디홈${result.handicap_home_pct}% → ${corrected}% (승무패홈${result.home_win_pct}% 초과 불가)`);
+          console.log(`[Analyze] 핸디 교정(원정유리-홈과다): 핸디홈${result.handicap_home_pct}% → ${corrected}%`);
           result.handicap_home_pct = corrected;
           result.handicap_away_pct = Math.min(99, result.handicap_away_pct + diff);
-          const total = result.handicap_home_pct + (result.handicap_draw_pct ?? 0) + result.handicap_away_pct;
-          if (total !== 100) {
-            result.handicap_away_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_home_pct;
-          }
+          result.handicap_away_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_home_pct;
+        }
+        // H- (원정유리): 핸디 원정 승률 반드시 ≥ 승무패 원정 승률 (원정이 유리하므로)
+        // 핸디 패(원정 커버) = 승무패 무 + 승무패 패 이상이어야 함
+        const minAwayCover = result.away_win_pct + Math.round(drawPct * 0.6);
+        if (result.handicap_away_pct < minAwayCover) {
+          const diff = minAwayCover - result.handicap_away_pct;
+          console.log(`[Analyze] 핸디 교정(원정유리-원정부족): 핸디원정${result.handicap_away_pct}% → ${minAwayCover}% (승무패원정${result.away_win_pct}%+무${drawPct}% 합산 기준)`);
+          result.handicap_away_pct = minAwayCover;
+          result.handicap_home_pct = Math.max(1, result.handicap_home_pct - Math.round(diff * 0.6));
+          result.handicap_draw_pct = Math.max(0, 100 - result.handicap_home_pct - result.handicap_away_pct);
         }
       }
     }
