@@ -208,15 +208,19 @@ export async function POST(req: Request) {
     const homeEn = encodeURIComponent((match.home_team as { name_en?: string }).name_en ?? '');
     const awayEn = encodeURIComponent((match.away_team as { name_en?: string }).name_en ?? '');
 
-    const [injuriesData, sofascoreData] = await Promise.allSettled([
+    const [injuriesData, sofascoreData, pitchersData] = await Promise.allSettled([
       withTimeout(fetch(`${baseUrl}/api/external/injuries?match_id=${match.id}`).then(r => r.ok ? r.json() : null), 5000),
-      // Sofascore: 축구만 (야구는 별도 패널)
+      // Sofascore: 축구만
       sport === 'soccer' && homeEn && awayEn
         ? withTimeout(fetch(`${baseUrl}/api/external/sofascore?home=${homeEn}&away=${awayEn}&sport=soccer`).then(r => r.ok ? r.json() : null), 10000)
         : Promise.resolve(null),
+      // 야구: 선발 투수 성적 (MLB/KBO/NPB 자동 감지)
+      sport === 'baseball'
+        ? withTimeout(fetch(`${baseUrl}/api/external/pitchers?match_id=${match.id}`).then(r => r.ok ? r.json() : null), 20000)
+        : Promise.resolve(null),
     ]);
 
-    const pitchers = null; // 야구 투수 데이터는 클라이언트 패널에서 직접 표시
+    const pitchers = (pitchersData.status === 'fulfilled' ? pitchersData.value : null) as Record<string,unknown> | null;
     const injuries = (injuriesData.status === 'fulfilled' ? injuriesData.value : null) as Record<string,unknown> | null;
     const sofascore = (sofascoreData.status === 'fulfilled' ? sofascoreData.value : null) as {
       homeForm?: string; awayForm?: string;
@@ -236,19 +240,18 @@ export async function POST(req: Request) {
 
     // ── 일관성 후처리: 예상스코어 ↔ 언더오버 모순 수정 ──────────────
     if (result.expected_score && result.under_pct != null && result.over_pct != null) {
-      // "1-0", "2-1" 등에서 총 골 수 추출
       const scoreMatch = result.expected_score.match(/(\d+)[:\-](\d+)/);
       if (scoreMatch) {
-        const totalGoals = parseInt(scoreMatch[1]) + parseInt(scoreMatch[2]);
-        const line = 2.5; // 기본 언더오버 기준선
-        if (totalGoals <= line && result.over_pct > result.under_pct) {
-          // 예상스코어는 언더인데 오버가 높음 → 언더오버 교정
+        const totalScore = parseInt(scoreMatch[1]) + parseInt(scoreMatch[2]);
+        // 실제 배당 라인값 사용 (야구=5.5, 축구=2.5 등 실제 값)
+        const uoBet = betCombos.find((c: BetCombo) => c.bet_type === 'under_over');
+        const line = uoBet?.line_value ? parseFloat(String(uoBet.line_value)) : 2.5;
+        if (totalScore <= line && result.over_pct > result.under_pct) {
           [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
-          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalGoals}골≤${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
-        } else if (totalGoals > line && result.under_pct > result.over_pct) {
-          // 예상스코어는 오버인데 언더가 높음 → 교정
+          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalScore}≤${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
+        } else if (totalScore > line && result.under_pct > result.over_pct) {
           [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
-          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalGoals}골>${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
+          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalScore}>${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
         }
       }
     }
@@ -389,7 +392,7 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
   "key_absences_home": ["핵심결장선수1_이름", "핵심결장선수2_이름"],
   "key_absences_away": ["핵심결장선수1_이름"],`;
 
-  return `당신은 전문 스포츠 애널리스트입니다. 아래 데이터를 바탕으로 경기를 분석해주세요.
+  return `당신은 전문 스포츠 애널리스트입니다. 아래의 실제 공식 데이터를 반드시 분석에 활용하세요. 추측이나 추정으로 채우지 말고, 제공된 데이터만을 근거로 분석하세요.
 
 ## 경기 정보
 리그: ${leagueName}
