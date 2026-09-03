@@ -218,6 +218,26 @@ export async function POST(req: Request) {
     if (!jsonMatch) throw new Error('AI 응답 파싱 실패');
 
     const result: AIAnalysis = JSON.parse(jsonMatch[0]);
+
+    // ── 일관성 후처리: 예상스코어 ↔ 언더오버 모순 수정 ──────────────
+    if (result.expected_score && result.under_pct != null && result.over_pct != null) {
+      // "1-0", "2-1" 등에서 총 골 수 추출
+      const scoreMatch = result.expected_score.match(/(\d+)[:\-](\d+)/);
+      if (scoreMatch) {
+        const totalGoals = parseInt(scoreMatch[1]) + parseInt(scoreMatch[2]);
+        const line = 2.5; // 기본 언더오버 기준선
+        if (totalGoals <= line && result.over_pct > result.under_pct) {
+          // 예상스코어는 언더인데 오버가 높음 → 언더오버 교정
+          [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
+          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalGoals}골≤${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
+        } else if (totalGoals > line && result.under_pct > result.over_pct) {
+          // 예상스코어는 오버인데 언더가 높음 → 교정
+          [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
+          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalGoals}골>${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
+        }
+      }
+    }
+
     await saveAnalysis(match.id, result);
 
     return NextResponse.json({ result, cached: false });
@@ -370,6 +390,12 @@ ${homeAbsList}
 ${awayAbsList}
 
 ---
+
+⚠️ 중요 일관성 규칙:
+- expected_score의 총 골 수가 2.5 이하이면 under_pct > over_pct 여야 함 (예: 1-0, 1-1, 2-0)
+- expected_score의 총 골 수가 2.5 초과이면 over_pct > under_pct 여야 함 (예: 2-1, 3-0)
+- winner_team이 "home"이면 home_win_pct가 가장 높아야 함
+- home_win_pct + draw_pct + away_win_pct = 100 이어야 함
 
 아래 JSON 형식으로만 응답해 (마크다운 없이, 순수 JSON만):
 {
