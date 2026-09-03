@@ -271,45 +271,53 @@ export async function POST(req: Request) {
       const isAwayFavorable = hcHomeOdds !== null && hcHomeOdds > mwHomeOdds; // 핸디 홈배당 > 승무패 홈배당 → 원정유리
 
       const drawPct = result.draw_pct ?? 0;
+      const hcDraw = result.handicap_draw_pct ?? 0;
+
+      // 배당에서 핸디캡 확률 역산 (vig 제거)
+      const hcAwayOdds = hcBet.away_odds ? parseFloat(String(hcBet.away_odds)) : null;
+      const hcDrawOdds = hcBet.draw_odds ? parseFloat(String(hcBet.draw_odds)) : null;
+      let oddsImpliedHcHome: number | null = null;
+      let oddsImpliedHcAway: number | null = null;
+      if (hcHomeOdds && hcAwayOdds) {
+        const sum = 1/hcHomeOdds + 1/hcAwayOdds + (hcDrawOdds ? 1/hcDrawOdds : 0);
+        oddsImpliedHcHome = Math.round(100 / (hcHomeOdds * sum));
+        oddsImpliedHcAway = Math.round(100 / (hcAwayOdds * sum));
+      }
+
+      // 핸디캡 합계 100% 보장 헬퍼
+      const fixHcSum = (home: number, draw: number, away: number): [number, number, number] => {
+        const total = home + draw + away;
+        if (total === 100) return [home, draw, away];
+        // away를 나머지로 채움
+        return [home, draw, Math.max(1, 100 - home - draw)];
+      };
 
       if (isHomeFavorable && result.handicap_away_pct != null && result.handicap_home_pct != null) {
-        // H+ (홈유리): 핸디 원정 승률 반드시 < 승무패 원정 승률
-        if (result.handicap_away_pct >= result.away_win_pct) {
-          const corrected = Math.max(1, Math.round(result.away_win_pct * 0.45));
-          const diff = result.handicap_away_pct - corrected;
-          console.log(`[Analyze] 핸디 교정(홈유리-원정과다): 핸디원정${result.handicap_away_pct}% → ${corrected}%`);
-          result.handicap_away_pct = corrected;
-          result.handicap_home_pct = Math.min(99, result.handicap_home_pct + diff);
-          result.handicap_home_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_away_pct;
-        }
-        // H+ (홈유리): 핸디 홈 승률 반드시 ≥ 승무패 홈 승률 (홈이 유리하므로)
-        if (result.handicap_home_pct < result.home_win_pct) {
-          const target = Math.min(98, result.home_win_pct + Math.round(drawPct * 0.5));
-          const diff = target - result.handicap_home_pct;
-          console.log(`[Analyze] 핸디 교정(홈유리-홈부족): 핸디홈${result.handicap_home_pct}% → ${target}%`);
-          result.handicap_home_pct = target;
-          result.handicap_away_pct = Math.max(1, result.handicap_away_pct - Math.round(diff * 0.7));
-          result.handicap_draw_pct = Math.max(0, 100 - result.handicap_home_pct - result.handicap_away_pct);
+        // H+ (홈유리): 핸디 홈 승률 반드시 ≥ 승무패 홈 승률
+        // 배당 역산값(oddsImplied) 우선, 그 다음 home_win_pct + drawPct/2
+        const theorMin = Math.round(result.home_win_pct + drawPct * 0.5);
+        const targetHome = Math.min(98, Math.max(theorMin, oddsImpliedHcHome ?? theorMin));
+        const needsFix = result.handicap_home_pct < theorMin || result.handicap_away_pct >= result.away_win_pct;
+        if (needsFix) {
+          console.log(`[Analyze] 핸디 교정(홈유리): 홈${result.handicap_home_pct}%→${targetHome}%, 원정${result.handicap_away_pct}%→${100-hcDraw-targetHome}%`);
+          const [nh, nd, na] = fixHcSum(targetHome, hcDraw, 0);
+          result.handicap_home_pct = nh;
+          result.handicap_draw_pct = nd;
+          result.handicap_away_pct = na;
         }
       } else if (isAwayFavorable && result.handicap_home_pct != null && result.handicap_away_pct != null) {
-        // H- (원정유리): 핸디 홈 승률 반드시 < 승무패 홈 승률 (홈이 불리하므로)
-        if (result.handicap_home_pct >= result.home_win_pct) {
-          const corrected = Math.max(1, Math.round(result.home_win_pct * 0.45));
-          const diff = result.handicap_home_pct - corrected;
-          console.log(`[Analyze] 핸디 교정(원정유리-홈과다): 핸디홈${result.handicap_home_pct}% → ${corrected}%`);
-          result.handicap_home_pct = corrected;
-          result.handicap_away_pct = Math.min(99, result.handicap_away_pct + diff);
-          result.handicap_away_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_home_pct;
-        }
-        // H- (원정유리): 핸디 원정 승률 반드시 ≥ 승무패 원정 승률 (원정이 유리하므로)
+        // H- (원정유리): 핸디 원정 승률 반드시 ≥ 승무패 원정 승률 + 무
         // 핸디 패(원정 커버) = 승무패 무 + 승무패 패 이상이어야 함
-        const minAwayCover = result.away_win_pct + Math.round(drawPct * 0.6);
-        if (result.handicap_away_pct < minAwayCover) {
-          const diff = minAwayCover - result.handicap_away_pct;
-          console.log(`[Analyze] 핸디 교정(원정유리-원정부족): 핸디원정${result.handicap_away_pct}% → ${minAwayCover}% (승무패원정${result.away_win_pct}%+무${drawPct}% 합산 기준)`);
-          result.handicap_away_pct = minAwayCover;
-          result.handicap_home_pct = Math.max(1, result.handicap_home_pct - Math.round(diff * 0.6));
-          result.handicap_draw_pct = Math.max(0, 100 - result.handicap_home_pct - result.handicap_away_pct);
+        const theorMin = Math.round(result.away_win_pct + drawPct * 0.6);
+        const targetAway = Math.min(98, Math.max(theorMin, oddsImpliedHcAway ?? theorMin));
+        const needsFix = result.handicap_away_pct < theorMin || result.handicap_home_pct >= result.home_win_pct;
+        if (needsFix) {
+          console.log(`[Analyze] 핸디 교정(원정유리): 원정${result.handicap_away_pct}%→${targetAway}%, 홈${result.handicap_home_pct}%→${100-hcDraw-targetAway}%`);
+          const newHome = Math.max(1, 100 - hcDraw - targetAway);
+          const [nh, nd, na] = fixHcSum(newHome, hcDraw, targetAway);
+          result.handicap_home_pct = nh;
+          result.handicap_draw_pct = nd;
+          result.handicap_away_pct = na;
         }
       }
     }
