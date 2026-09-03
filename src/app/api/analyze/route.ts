@@ -238,7 +238,7 @@ export async function POST(req: Request) {
 
     const result: AIAnalysis = JSON.parse(jsonMatch[0]);
 
-    // ── 일관성 후처리: 예상스코어 ↔ 언더오버 모순 수정 ──────────────
+    // ── 일관성 후처리 1: 예상스코어 ↔ 언더오버 모순 수정 ──────────────
     if (result.expected_score && result.under_pct != null && result.over_pct != null) {
       const scoreMatch = result.expected_score.match(/(\d+)[:\-](\d+)/);
       if (scoreMatch) {
@@ -252,6 +252,50 @@ export async function POST(req: Request) {
         } else if (totalScore > line && result.under_pct > result.over_pct) {
           [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
           console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalScore}>${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
+        }
+      }
+    }
+
+    // ── 일관성 후처리 2: 핸디캡 ↔ 승무패 수학적 관계 강제 교정 ──────────────
+    // 핵심 원리: 핸디 결과는 승무패 결과의 "부분집합"
+    // H+ 핸디(홈유리): handicap_away_pct < away_win_pct 반드시 성립
+    // H- 핸디(원정유리): handicap_home_pct < home_win_pct 반드시 성립
+    const allHcBets = betCombos.filter((c: BetCombo) => c.bet_type === 'handicap');
+    const mwBet = betCombos.find((c: BetCombo) => c.bet_type === 'match_winner');
+    const mwHomeOdds = mwBet?.home_odds ? parseFloat(String(mwBet.home_odds)) : null;
+
+    if (allHcBets.length > 0 && mwHomeOdds && result.home_win_pct != null && result.away_win_pct != null) {
+      const hcBet = allHcBets[0]; // 첫 번째 핸디캡 기준
+      const hcHomeOdds = hcBet.home_odds ? parseFloat(String(hcBet.home_odds)) : null;
+      const isHomeFavorable = hcHomeOdds !== null && hcHomeOdds < mwHomeOdds; // 핸디 홈배당 < 승무패 홈배당 → 홈유리
+      const isAwayFavorable = hcHomeOdds !== null && hcHomeOdds > mwHomeOdds; // 핸디 홈배당 > 승무패 홈배당 → 원정유리
+
+      if (isHomeFavorable && result.handicap_away_pct != null && result.handicap_home_pct != null) {
+        // H+ (홈유리): 핸디 원정 승률 반드시 < 승무패 원정 승률
+        if (result.handicap_away_pct >= result.away_win_pct) {
+          const corrected = Math.max(1, Math.round(result.away_win_pct * 0.45)); // 전체의 45% 이하로
+          const diff = result.handicap_away_pct - corrected;
+          console.log(`[Analyze] 핸디 교정(홈유리): 핸디원정${result.handicap_away_pct}% → ${corrected}% (승무패원정${result.away_win_pct}% 초과 불가)`);
+          result.handicap_away_pct = corrected;
+          result.handicap_home_pct = Math.min(99, result.handicap_home_pct + diff);
+          // 합계 100 맞추기
+          const total = result.handicap_home_pct + (result.handicap_draw_pct ?? 0) + result.handicap_away_pct;
+          if (total !== 100) {
+            result.handicap_home_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_away_pct;
+          }
+        }
+      } else if (isAwayFavorable && result.handicap_home_pct != null && result.handicap_away_pct != null) {
+        // H- (원정유리): 핸디 홈 승률 반드시 < 승무패 홈 승률
+        if (result.handicap_home_pct >= result.home_win_pct) {
+          const corrected = Math.max(1, Math.round(result.home_win_pct * 0.45));
+          const diff = result.handicap_home_pct - corrected;
+          console.log(`[Analyze] 핸디 교정(원정유리): 핸디홈${result.handicap_home_pct}% → ${corrected}% (승무패홈${result.home_win_pct}% 초과 불가)`);
+          result.handicap_home_pct = corrected;
+          result.handicap_away_pct = Math.min(99, result.handicap_away_pct + diff);
+          const total = result.handicap_home_pct + (result.handicap_draw_pct ?? 0) + result.handicap_away_pct;
+          if (total !== 100) {
+            result.handicap_away_pct = 100 - (result.handicap_draw_pct ?? 0) - result.handicap_home_pct;
+          }
         }
       }
     }
@@ -476,17 +520,36 @@ ${sportSpecificFields}
 - 한국어로 작성
 - JSON 외에 다른 텍스트 절대 포함 금지
 
-[핸디캡 일관성 필수 규칙]
-- H+ (홈팀 유리 핸디): handicap_home_pct >= home_win_pct
-- H- (홈팀 불리 핸디): handicap_home_pct <= home_win_pct
-- 승무패에서 홈이 이긴다고 했으면, 홈 유리 핸디에서 원정이 이긴다고 하면 절대 안 됨
-- 핸디캡 라인이 클수록 불리한 팀의 핸디 승률은 반드시 낮아야 함 (H-1과 H-2.5의 확률이 같으면 안 됨)
-- 승1패 핸디캡 (H-1): 2점 이상 차이로 이겨야 승, 1점 이내 차이(홈 1점 승 / 동점 0:0 / 원정 1점 승)는 양팀 모두 무, 원정이 2점 이상 차로 이겨야 패
-  → 즉 "동점도 무", "원정 1점 승도 무" — 무 확률이 일반 승무패보다 훨씬 넓은 범위
-- H-2.5, H-1.5 등 .5 라인: 소수점 반 점이므로 무(push) 절대 불가, 반드시 handicap_draw_pct = 0 및 ht_handicap_draw_pct = 0
-  (예: "5회 핸디캡 H-1.5"는 절대 무가 나올 수 없음 → ht_handicap_draw_pct = 0 필수)
-- 승1패 무 확률은 반드시 match_winner의 draw_pct보다 훨씬 높아야 함 (±1점 범위이므로)
-- 야구 기준 핸디 1점 차이마다 홈 승률 약 8~12%p 차이 발생
+[핸디캡 확률의 수학적 관계 — 절대 위반 금지]
+★ 핵심 원리: 핸디캡 결과는 승무패 결과의 "부분집합"이다.
+
+① 홈팀 유리 핸디캡 (H+, 홈에게 점수를 더 주는 경우 = 핸디 홈배당 < 승무패 홈배당):
+   - "핸디 원정승" = 원정이 핸디점수 초과로 이겨야 함 = 승무패 원정승의 부분집합
+   - 따라서: handicap_away_pct < away_win_pct (반드시 더 낮아야 함, 절대로 높으면 안 됨)
+   - 따라서: handicap_home_pct > home_win_pct (홈이 핸디로 더 유리하므로 더 높아야 함)
+
+   ⚠️ 금지 예: 승무패 원정승 52%, H+2.5 원정승 71% → 수학적 불가능! 원정이 3점 차 이상 이겨야 성립하는데 전체 승률보다 높을 수 없음
+   ✅ 올바른 예: 승무패 원정승 52% → H+2.5 원정승은 15~25% 수준이어야 함 (대량 득점 조건이라 훨씬 낮음)
+
+② 원정팀 유리 핸디캡 (H-, 원정에게 점수를 더 주는 경우 = 핸디 홈배당 > 승무패 홈배당):
+   - "핸디 홈승" = 홈이 핸디점수 초과로 이겨야 함 = 승무패 홈승의 부분집합
+   - 따라서: handicap_home_pct < home_win_pct (반드시 더 낮아야 함)
+   - 따라서: handicap_away_pct > away_win_pct
+
+③ 승1패 핸디캡 (H-1, 홈팀이 1점 불리한 핸디캡):
+   - 홈이 2점 이상 차이로 이겨야 핸디 홈승
+   - 1점 이내 차이(홈 1점 승 / 동점 / 원정 1점 승)는 무(push)
+   - 원정이 2점 이상 차이로 이겨야 핸디 원정승
+   - 승무패 홈배당과 핸디 홈배당을 비교하여 방향 결정:
+     만약 핸디 홈배당 > 승무패 홈배당 → H- (원정 유리) → handicap_home_pct < home_win_pct
+   - 무 확률은 ±1점 범위(동점+1점차 양방향)를 포함하므로 승무패 무 확률보다 훨씬 높아야 함
+
+④ .5 라인 핸디캡 (H+2.5, H-1.5 등): 소수점 반점이므로 무(push) 절대 불가
+   - handicap_draw_pct = 0 필수
+
+⑤ 핸디캡 라인이 클수록 (H+1 → H+2.5 → H+3.5):
+   - 홈유리 핸디일수록: handicap_home_pct는 라인이 클수록 높아지고, handicap_away_pct는 더 낮아짐
+   - 야구 기준 핸디 1점 차이마다 약 8~12%p 차이 발생
 
 [승1패 무 확률 역산 필수 — 위반 시 오류]
 - 배당 표에 무 배당(예: 2.90)이 있으면 handicap_draw_pct는 절대 0이 되면 안 됨
