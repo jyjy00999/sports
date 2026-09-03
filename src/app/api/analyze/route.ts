@@ -199,18 +199,33 @@ export async function POST(req: Request) {
     const homeAbsences = absences.filter(a => a.team_id === (match.home_team as { id?: string } | null)?.id);
     const awayAbsences = absences.filter(a => a.team_id === (match.away_team as { id?: string } | null)?.id);
 
-    // 결장자만 수집 (투수 데이터는 클라이언트에서 별도 수집 — 분석 속도에 영향 없음)
+    // 외부 데이터 병렬 수집 (결장자 + Sofascore)
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
     const withTimeout = (p: Promise<unknown>, ms: number) =>
       Promise.race([p, new Promise<null>((res) => setTimeout(() => res(null), ms))]);
-    const [injuriesData] = await Promise.allSettled([
+
+    const sport = match.league?.sport?.name_kr === '야구' ? 'baseball' : 'soccer';
+    const homeEn = encodeURIComponent((match.home_team as { name_en?: string }).name_en ?? '');
+    const awayEn = encodeURIComponent((match.away_team as { name_en?: string }).name_en ?? '');
+
+    const [injuriesData, sofascoreData] = await Promise.allSettled([
       withTimeout(fetch(`${baseUrl}/api/external/injuries?match_id=${match.id}`).then(r => r.ok ? r.json() : null), 5000),
+      // Sofascore: 축구만 (야구는 별도 패널)
+      sport === 'soccer' && homeEn && awayEn
+        ? withTimeout(fetch(`${baseUrl}/api/external/sofascore?home=${homeEn}&away=${awayEn}&sport=soccer`).then(r => r.ok ? r.json() : null), 10000)
+        : Promise.resolve(null),
     ]);
-    const pitchers = null; // 투수 데이터는 프롬프트에서 제외 (클라이언트 패널에서 직접 표시)
+
+    const pitchers = null; // 야구 투수 데이터는 클라이언트 패널에서 직접 표시
     const injuries = (injuriesData.status === 'fulfilled' ? injuriesData.value : null) as Record<string,unknown> | null;
+    const sofascore = (sofascoreData.status === 'fulfilled' ? sofascoreData.value : null) as {
+      homeForm?: string; awayForm?: string;
+      h2h?: { homeWins: number; awayWins: number; draws: number };
+      missing?: { home: Array<{name:string;injury:string;expectedReturn:string|null}>; away: Array<{name:string;injury:string;expectedReturn:string|null}> };
+    } | null;
 
     const betCombos = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
-    const prompt = buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries });
+    const prompt = buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries, sofascore });
 
     const raw = await callAI(prompt);
 
@@ -255,13 +270,18 @@ export async function POST(req: Request) {
   }
 }
 
-function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries }: {
+function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries, sofascore }: {
   match: Match;
   homeAbsences: Array<Record<string, unknown>>;
   awayAbsences: Array<Record<string, unknown>>;
   betCombos: BetCombo[];
   pitchers: Record<string, unknown> | null;
   injuries: Record<string, unknown> | null;
+  sofascore?: {
+    homeForm?: string; awayForm?: string;
+    h2h?: { homeWins: number; awayWins: number; draws: number };
+    missing?: { home: Array<{name:string;injury:string;expectedReturn:string|null}>; away: Array<{name:string;injury:string;expectedReturn:string|null}> };
+  } | null;
 }): string {
   const homeAbsList = homeAbsences.map((a: Record<string, unknown>) => {
     const p = a.player as Record<string, unknown> | undefined;
@@ -388,6 +408,13 @@ ${homeAbsList}
 
 ## 원정팀 결장자-DB (${awayName})
 ${awayAbsList}
+${sofascore ? `
+## 실시간 데이터 [Sofascore]
+홈팀 최근 5경기 폼: ${sofascore.homeForm ?? '정보없음'} (W=승 D=무 L=패, 최신→과거)
+원정팀 최근 5경기 폼: ${sofascore.awayForm ?? '정보없음'}
+상대전적 (Sofascore 통계): 홈팀 ${sofascore.h2h?.homeWins ?? '?'}승 / 무 ${sofascore.h2h?.draws ?? '?'} / 원정팀 ${sofascore.h2h?.awayWins ?? '?'}승
+${sofascore.missing?.home?.length ? `홈팀 결장자 (Sofascore): ${sofascore.missing.home.map(p => `${p.name}(${p.injury}${p.expectedReturn ? ', 복귀:'+p.expectedReturn : ''})`).join(', ')}` : '홈팀 결장자 (Sofascore): 없음'}
+${sofascore.missing?.away?.length ? `원정팀 결장자 (Sofascore): ${sofascore.missing.away.map(p => `${p.name}(${p.injury}${p.expectedReturn ? ', 복귀:'+p.expectedReturn : ''})`).join(', ')}` : '원정팀 결장자 (Sofascore): 없음'}` : ''}
 
 ---
 

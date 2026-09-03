@@ -198,17 +198,123 @@ async function fetchMLBStats(id: number, name: string): Promise<PitcherStat> {
   }
 }
 
-// ── NPB 선발 조회 (npb.jp 일정 페이지) ──────────────────────────
+// ── NPB 일정 略称 → 선수명단 파일 코드 ─────────────────────────────
+const NPB_SCH_TO_RST: Array<[string, string]> = [
+  ['巨人', 'g'],  ['読売', 'g'],
+  ['DeNA', 'db'], ['ＤｅＮＡ', 'db'], ['横浜', 'db'],
+  ['阪神', 't'],
+  ['中日', 'd'],
+  ['広島', 'c'],
+  ['ヤクルト', 's'],
+  ['ソフトバンク', 'h'],
+  ['日本ハム', 'f'],
+  ['オリックス', 'b'],
+  ['楽天', 'e'],
+  ['西武', 'l'],
+  ['ロッテ', 'm'],
+];
+
+function npbSchToRst(abbr: string): string | null {
+  for (const [key, code] of NPB_SCH_TO_RST) {
+    if (abbr.includes(key) || key.includes(abbr)) return code;
+  }
+  return null;
+}
+
+const NPB_FETCH_OPTS: RequestInit = {
+  headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36' },
+  cache: 'no-store',
+};
+
+// 팀 선수명단 조회: { name(공백제거), id } 배열
+async function fetchNPBRoster(rstCode: string): Promise<Array<{ name: string; id: string }>> {
+  try {
+    const res = await fetchWithTimeout(`https://npb.jp/bis/teams/rst_${rstCode}.html`, NPB_FETCH_OPTS, 8000);
+    if (!res.ok) return [];
+    const html = await res.text();
+    const players: Array<{ name: string; id: string }> = [];
+    const regex = /\/bis\/players\/(\d+)\.html"[^>]*>\s*([^<]+?)\s*</g;
+    let m;
+    while ((m = regex.exec(html)) !== null) {
+      const id = m[1];
+      const name = m[2].replace(/[\s　]+/g, ''); // 전각 공백 포함 제거
+      if (id && name && !/成績|一覧|検索/.test(name)) {
+        players.push({ id, name });
+      }
+    }
+    return players;
+  } catch {
+    return [];
+  }
+}
+
+// 일정 약칭(e.g. "伊藤将")으로 선수 ID 찾기
+function findNPBPlayer(roster: Array<{ name: string; id: string }>, abbr: string): string | null {
+  if (!abbr) return null;
+  // 1. 완전 일치
+  const exact = roster.find(p => p.name === abbr);
+  if (exact) return exact.id;
+  // 2. 풀네임이 약칭으로 시작
+  const sw = roster.find(p => p.name.startsWith(abbr));
+  if (sw) return sw.id;
+  // 3. 성씨 2글자만으로 유일 매칭
+  if (abbr.length >= 2) {
+    const byLn = roster.filter(p => p.name.startsWith(abbr.slice(0, 2)));
+    if (byLn.length === 1) return byLn[0].id;
+  }
+  return null;
+}
+
+// NPB 선수 페이지에서 투수 시즌 성적 파싱
+async function fetchNPBPlayerPitchStats(id: string, name: string): Promise<PitcherStat> {
+  const base: PitcherStat = { name, era: null, wins: null, losses: null, whip: null, ip: null, k9: null, source: 'NPB' };
+  try {
+    const res = await fetchWithTimeout(`https://npb.jp/bis/players/${id}.html`, NPB_FETCH_OPTS, 8000);
+    if (!res.ok) return base;
+    const html = await res.text();
+    const year = new Date().getFullYear();
+    // 태그 제거 후 탭 구분 텍스트로 변환
+    const plain = html.replace(/<[^>]+>/g, '\t').replace(/&[a-z]+;/g, ' ').replace(/\t+/g, '\t');
+    for (const line of plain.split('\n')) {
+      const cols = line.split('\t').map(c => c.trim()).filter(Boolean);
+      // 열 순서: 年度 球団 登板 勝利 敗北 S H HP 完投 完封 無四球 勝率 打者 投球回 安打 本塁打 四球 死球 三振 暴投 ボーク 失点 自責点 防御率
+      //          0     1    2    3    4    5  6  7   8    9    10    11   12   13    14   15    16   17   18   19   20    21   22    23
+      if (cols.length >= 22 && cols[0] === String(year)) {
+        const w   = parseInt(cols[3]);
+        const l   = parseInt(cols[4]);
+        const ip  = parseFloat(cols[13]);
+        const hA  = parseInt(cols[14]);
+        const bb  = parseInt(cols[16]);
+        const k   = parseInt(cols[18]);
+        const era = parseFloat(cols[23]);
+        const whip = (!isNaN(ip) && ip > 0 && !isNaN(hA) && !isNaN(bb))
+          ? parseFloat(((hA + bb) / ip).toFixed(2)) : null;
+        return {
+          name,
+          era:    isNaN(era) ? null : era,
+          wins:   isNaN(w)   ? null : w,
+          losses: isNaN(l)   ? null : l,
+          whip,
+          ip:     isNaN(ip)  ? null : ip,
+          k9: (!isNaN(k) && !isNaN(ip) && ip > 0) ? parseFloat((k / ip * 9).toFixed(2)) : null,
+          source: 'NPB',
+        };
+      }
+    }
+  } catch (e) {
+    console.error('[NPB player stats]', e);
+  }
+  return base;
+}
+
+// ── NPB 선발 조회 (npb.jp) — 이름 + 시즌 성적 ────────────────────
 async function fetchNPBPitchers(homeKr: string, awayKr: string, matchDate: string): Promise<MatchPitchers> {
   try {
     const d = new Date(matchDate);
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
     const url = `https://npb.jp/games/${year}/schedule_${month}_detail.html`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36' },
-      cache: 'no-store',
-    });
+    const res = await fetchWithTimeout(url, NPB_FETCH_OPTS, 8000);
     if (!res.ok) return { home: null, away: null, leagueType: 'NPB' };
     const html = await res.text();
 
@@ -216,23 +322,17 @@ async function fetchNPBPitchers(homeKr: string, awayKr: string, matchDate: strin
     const awayJp = krToNpbJp(awayKr);
     if (!homeJp || !awayJp) return { home: null, away: null, leagueType: 'NPB' };
 
-    // 날짜 패턴: "9/2（水）" 또는 "9/2（木）" 등
     const dayNum = d.getDate();
     const monthNum = d.getMonth() + 1;
     const dayPattern = `${monthNum}/${dayNum}（`;
 
-    // 전체 HTML을 줄 단위로 분석
     const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    // "선발" 정보가 포함된 경기 찾기
-    // 패턴: "X/Y（...) ... homeJp ... awayJp ... 先発：A 先発：B"
-    // 또는 "homeJp ... awayJp ... 先発：A 先発：B" 위아래 문맥에서
     const dayIdx = text.indexOf(dayPattern);
     if (dayIdx < 0) return { home: null, away: null, leagueType: 'NPB' };
 
-    // 해당 날짜 이후 텍스트에서 팀 + 선발 찾기
     const afterDay = text.slice(dayIdx, dayIdx + 5000);
 
-    // 모든 경기 항목 파싱: "A - B ... 先発：X 先発：Y"
+    // "A - B ... 先発：X 先発：Y" 패턴 파싱
     const gameRegex = /([^\s]{1,8})\s+[-－]\s+([^\s]{1,8})[^先]*先発：(\S+)\s+先発：(\S+)/g;
     let m;
     while ((m = gameRegex.exec(afterDay)) !== null) {
@@ -240,13 +340,37 @@ async function fetchNPBPitchers(homeKr: string, awayKr: string, matchDate: strin
       const homeMatch = t1.includes(homeJp) || t2.includes(homeJp);
       const awayMatch = t1.includes(awayJp) || t2.includes(awayJp);
       if (homeMatch && awayMatch) {
-        // t1이 홈팀이면 p1이 홈 선발
         const homeIsT1 = t1.includes(homeJp);
-        return {
-          home: { name: homeIsT1 ? p1 : p2, era: null, wins: null, losses: null, whip: null, ip: null, k9: null, source: 'NPB' },
-          away: { name: homeIsT1 ? p2 : p1, era: null, wins: null, losses: null, whip: null, ip: null, k9: null, source: 'NPB' },
-          leagueType: 'NPB',
-        };
+        const homeStarterAbbr = homeIsT1 ? p1 : p2;
+        const awayStarterAbbr = homeIsT1 ? p2 : p1;
+        const homeTeamAbbr    = homeIsT1 ? t1 : t2;
+        const awayTeamAbbr    = homeIsT1 ? t2 : t1;
+
+        // 팀 코드 조회
+        const homeCode = npbSchToRst(homeTeamAbbr);
+        const awayCode = npbSchToRst(awayTeamAbbr);
+
+        // 선수명단 병렬 조회
+        const [homeRoster, awayRoster] = await Promise.all([
+          homeCode ? fetchNPBRoster(homeCode) : Promise.resolve([]),
+          awayCode ? fetchNPBRoster(awayCode) : Promise.resolve([]),
+        ]);
+
+        const homePlayerId = findNPBPlayer(homeRoster, homeStarterAbbr);
+        const awayPlayerId = findNPBPlayer(awayRoster, awayStarterAbbr);
+
+        // 개인 성적 병렬 조회
+        const [homePitcher, awayPitcher] = await Promise.all([
+          homePlayerId
+            ? fetchNPBPlayerPitchStats(homePlayerId, homeStarterAbbr)
+            : Promise.resolve<PitcherStat>({ name: homeStarterAbbr, era: null, wins: null, losses: null, whip: null, ip: null, k9: null, source: 'NPB' }),
+          awayPlayerId
+            ? fetchNPBPlayerPitchStats(awayPlayerId, awayStarterAbbr)
+            : Promise.resolve<PitcherStat>({ name: awayStarterAbbr, era: null, wins: null, losses: null, whip: null, ip: null, k9: null, source: 'NPB' }),
+        ]);
+
+        console.log(`[NPB] 홈:${homeStarterAbbr}(${homePlayerId}) ERA:${homePitcher.era} 원정:${awayStarterAbbr}(${awayPlayerId}) ERA:${awayPitcher.era}`);
+        return { home: homePitcher, away: awayPitcher, leagueType: 'NPB' };
       }
     }
     return { home: null, away: null, leagueType: 'NPB' };
