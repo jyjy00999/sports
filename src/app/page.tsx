@@ -45,10 +45,12 @@ function MatchDetail({ match, onClose }: { match: Match; onClose: () => void }) 
   const doAnalyze = async () => {
     setAnalyzing(true);
     try {
+      // 이미 분석 결과가 있으면 재분석(force=true)으로 캐시 무시
+      const force = !!analysis;
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ match }),
+        body: JSON.stringify({ match, force }),
       });
       const data = await res.json();
       if (data.result) { setAnalysis(data.result); setTab('ai'); }
