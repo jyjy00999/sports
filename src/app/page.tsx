@@ -2078,7 +2078,8 @@ export default function HomePage() {
     try {
       const res = await fetch('/api/betman');
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      // detail 에 실제 원인(환경변수 누락 / DB 연결 불가 / 테이블 없음)이 담겨 옴
+      if (!res.ok) throw new Error(data.detail ? `${data.error} — ${data.detail}` : data.error);
       setMatches(data.matches ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : '데이터 로드 실패');
