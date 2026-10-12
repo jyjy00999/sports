@@ -4,6 +4,7 @@
  */
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { detectSport, parseLineNumber, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -11,11 +12,19 @@ const supabase = createClient(
 );
 
 // ── 리그/팀 생성 헬퍼 ──────────────────────────────────────
-async function findOrCreateLeague(name_kr: string) {
+async function findOrCreateLeague(name_kr: string, sportKey: SportKey = 'soccer') {
   const { data } = await supabase.from('leagues').select('id').eq('name_kr', name_kr).limit(1);
   if (data?.length) return data[0].id;
-  const sport = await supabase.from('sports').select('id').eq('name_en', 'soccer').limit(1);
-  const sport_id = sport.data?.[0]?.id ?? null;
+  // 종목 레코드 확보 (없으면 생성) — 기존에는 무조건 soccer로 넣어 농구/배구/야구가 축구로 분류되던 버그
+  const nameKrOfSport = SPORT_RULES[sportKey].name;
+  let sport_id: string | null = null;
+  const found = await supabase.from('sports').select('id').eq('name_en', sportKey).limit(1);
+  if (found.data?.length) {
+    sport_id = found.data[0].id;
+  } else {
+    const created = await supabase.from('sports').insert({ name_en: sportKey, name_kr: nameKrOfSport }).select('id');
+    sport_id = created.data?.[0]?.id ?? null;
+  }
   const { data: ins } = await supabase.from('leagues').insert({ name_kr, name_en: name_kr, sport_id }).select('id');
   return ins?.[0]?.id ?? null;
 }
@@ -92,8 +101,11 @@ function makeBetRow(row: ZentotoRow): BetRow {
   if (suffix.includes('홀/짝')) {
     return { combo_no: n, type: 'sum', label: '홀/짝 SUM', line_value: null, odd_odds: w, even_odds: l };
   }
-  if (suffix.includes('승1패')) {
-    return { combo_no: n, type: 'handicap', label: '핸디캡 승1패', line_value: '승1패', home_odds: w, draw_odds: d, away_odds: l };
+  // 승1패(야구) / 승5패(농구) — 핸디캡이 아니라 '점수차 이내' 마진 유형
+  const marginMatch = suffix.match(/승\s*(\d+)\s*패/);
+  if (marginMatch) {
+    const t = marginMatch[1];
+    return { combo_no: n, type: 'margin', label: `승${t}패`, line_value: `승${t}패`, home_odds: w, draw_odds: d, away_odds: l };
   }
   return { combo_no: n, type: 'match_winner', label: '승무패', line_value: null, home_odds: w, draw_odds: d, away_odds: l };
 }
@@ -137,17 +149,25 @@ function groupRows(rows: ZentotoRow[]): MatchGroup[] {
   return groups;
 }
 
-// ── 리그 추정 (핸디캡 라인 크기로 종목 구분) ─────────────────────
-function guessLeague(group: MatchGroup): string {
+// ── 종목 추정 (언더오버 라인 > 팀명 > 핸디캡 라인 순으로 판정) ──────
+function guessSport(group: MatchGroup): SportKey {
   const hn = group.baseName;
-  if (hn.includes('_남자') || hn.includes('_여자')) return '농구';
+  // 젠토토 농구 표기: 팀명에 _남자/_여자 접미사
+  if (hn.includes('_남자') || hn.includes('_여자')) return 'basketball';
+
+  const uo = group.betTypes.find(b => b.type === 'under_over');
   const hc = group.betTypes.find(b => b.type === 'handicap');
-  if (hc?.line_value) {
-    const num = parseFloat(hc.line_value.replace(/[^0-9.]/g, '') || '0');
-    if (num >= 5) return '농구';
-    if (num >= 2) return '야구';
-  }
-  return '기타';
+
+  return detectSport({
+    homeName: group.baseName,
+    awayName: group.awayName,
+    totalLine: parseLineNumber(uo?.line_value),
+    handicapLine: hc?.line_value ? Math.abs(parseLineNumber(hc.line_value) ?? 0) : null,
+  });
+}
+
+function guessLeague(group: MatchGroup): string {
+  return SPORT_RULES[guessSport(group)].name;
 }
 
 // ── DB 저장 ────────────────────────────────────────────────
@@ -157,8 +177,9 @@ async function saveGroups(groups: MatchGroup[]) {
 
   for (const group of groups) {
     try {
+      const sportKey   = guessSport(group);
       const league_name = guessLeague(group);
-      const league_id  = await findOrCreateLeague(league_name);
+      const league_id  = await findOrCreateLeague(league_name, sportKey);
       const home_id    = await findOrCreateTeam(group.baseName, league_id);
       const away_id    = await findOrCreateTeam(group.awayName, league_id);
 

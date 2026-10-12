@@ -53,6 +53,7 @@ export interface Match {
 export interface BetCombo {
   bet_type:
     | 'match_winner' | 'handicap' | 'under_over' | 'sum'
+    | 'margin'                                              // 승1패(야구) / 승5패(농구)
     | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over';  // 전반전
   betman_combo_no: number | null;
   bet_label: string;
@@ -137,6 +138,9 @@ export interface AIAnalysis {
   verdict: string;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   // 전체 베팅 유형 확률
+  margin_home_pct?: number | null;   // 승1패/승5패 — 승 (임계값+1 점차 이상 승리)
+  margin_mid_pct?: number | null;    // 승1패/승5패 — 가운데 (임계값 이내, 무승부 포함)
+  margin_away_pct?: number | null;   // 승1패/승5패 — 패 (임계값+1 점차 이상 패배)
   handicap_home_pct?: number;
   handicap_draw_pct?: number;
   handicap_away_pct?: number;

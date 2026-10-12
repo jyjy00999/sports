@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, createContext, useContext } from 'react';
+import { detectSport, parseLineNumber } from '@/lib/sports-rules';
 import type { Match } from '@/types';
 
 // ── 색상 테마 ──
@@ -327,6 +328,17 @@ function BetRow({
   const isBest = (i: number) => i === bestIdx;
 
   const renderOdds = () => {
+    // 승1패(야구) / 승5패(농구) — 가운데는 '무'가 아니라 'N점차 이내'(무승부 포함)
+    if (combo.bet_type === 'margin') {
+      const thr = parseInt(combo.line_value?.match(/승\s*(\d+)\s*패/)?.[1] ?? '1', 10);
+      return (
+        <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
+          <OddsButton label={`${thr + 1}점차+ 승`} value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} />
+          <OddsButton label={`${thr}점차 이내`}    value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} />
+          <OddsButton label={`${thr + 1}점차+ 패`} value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} />
+        </div>
+      );
+    }
     if (combo.bet_type === 'match_winner' || combo.bet_type === 'handicap' ||
         combo.bet_type === 'ht_match_winner' || combo.bet_type === 'ht_handicap') {
       return (
@@ -425,6 +437,8 @@ type MatchAnalysis = {
   home_win_pct: number; draw_pct: number; away_win_pct: number;
   expected_score?: string;
   handicap_home_pct?: number; handicap_draw_pct?: number; handicap_away_pct?: number;
+  // 승1패(야구) / 승5패(농구) — 핸디캡과 다른 '점수차 이내' 마진 유형
+  margin_home_pct?: number | null; margin_mid_pct?: number | null; margin_away_pct?: number | null;
   under_pct?: number; over_pct?: number;
   odd_pct?: number; even_pct?: number;
   // 전반전
@@ -434,7 +448,7 @@ type MatchAnalysis = {
   best_bet_type?: string; best_bet_option?: string; best_bet_reason?: string;
   confidence: string;
   // 스포츠별 상세
-  sport_type?: 'soccer' | 'baseball';
+  sport_type?: 'soccer' | 'baseball' | 'basketball' | 'volleyball';
   match_summary?: string;
   // 축구
   home_attack_rating?: number; home_defense_rating?: number;
@@ -454,7 +468,7 @@ type MatchAnalysis = {
 type AnalysisEntry = MatchAnalysis & { timestamp: number; nth: number };
 
 // ── 카테고리 추천 패널 ──
-type BetCatKey = 'match_winner' | 'handicap' | 'under_over' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over' | 'draw';
+type BetCatKey = 'match_winner' | 'handicap' | 'margin' | 'under_over' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over' | 'draw';
 type BetPick = {
   match: Match;
   option: string;     // 홈승, 언더 등
@@ -465,6 +479,7 @@ type BetPick = {
 const CAT_CONFIG: Record<BetCatKey, { label: string; emoji: string }> = {
   match_winner:    { label: '승무패',      emoji: '⚔️' },
   handicap:        { label: '핸디캡',      emoji: '⚖️' },
+  margin:          { label: '승1패/승5패', emoji: '🎯' },
   under_over:      { label: '언더오버',    emoji: '↕️' },
   ht_match_winner: { label: '전반승무패',  emoji: '1️⃣' },
   ht_handicap:     { label: '전반핸디',    emoji: '½' },
@@ -511,6 +526,15 @@ function getTopPicks(
         if (!a.handicap_home_pct && !a.handicap_draw_pct && !a.handicap_away_pct) continue;
         const vals = [a.handicap_home_pct ?? 0, a.handicap_draw_pct ?? 0, a.handicap_away_pct ?? 0];
         const opts = [`${m.home_team.name_kr} 승`, '무승부', `${m.away_team.name_kr} 승`];
+        const idx = vals.indexOf(Math.max(...vals));
+        pct = vals[idx]; option = opts[idx];
+        break;
+      }
+      case 'margin': {
+        if (a.margin_home_pct == null && a.margin_mid_pct == null && a.margin_away_pct == null) continue;
+        const thr = combo?.line_value?.match(/승\s*(\d+)\s*패/)?.[1] ?? '1';
+        const vals = [a.margin_home_pct ?? 0, a.margin_mid_pct ?? 0, a.margin_away_pct ?? 0];
+        const opts = [`${m.home_team.name_kr} ${parseInt(thr)+1}점차+ 승`, `${thr}점차 이내`, `${m.away_team.name_kr} ${parseInt(thr)+1}점차+ 승`];
         const idx = vals.indexOf(Math.max(...vals));
         pct = vals[idx]; option = opts[idx];
         break;
@@ -876,11 +900,7 @@ type InjuredPlayer = { name: string; injury: string; status: string; chanceOfPla
 type TeamInjuries = { teamName: string; players: InjuredPlayer[] };
 type InjuriesData = { home: TeamInjuries|null; away: TeamInjuries|null; source: string };
 
-// ── 스포츠 타입 감지 ──
-function detectSport(leagueName: string): 'baseball' | 'soccer' {
-  const b = ['MLB','KBO','NPB','야구','메이저리그','퍼시픽','센트럴'];
-  return b.some(k => leagueName.includes(k)) ? 'baseball' : 'soccer';
-}
+// ── 스포츠 타입 감지: src/lib/sports-rules.ts 의 공식 규정 기반 모듈 사용 ──
 
 // ── 폼 도트 (W/D/L → 색깔 점) ──
 function FormDots({ form }: { form: string }) {
@@ -1175,7 +1195,22 @@ function MatchBetmanRow({
   const [showExt, setShowExt]         = useState(false);
   const [showDetail, setShowDetail]   = useState(false);
 
-  const sport = detectSport(match.league?.name_kr ?? '');
+  // bet_combos 가 있으면 사용, 없으면 latest_odds로 승무패 폴백 (getPcts에서 필요하므로 먼저 선언)
+  const rawCombos = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
+
+  const sport = detectSport({
+    sportName: (match.league as { sport?: { name_kr?: string } } | null)?.sport?.name_kr ?? null,
+    leagueName: match.league?.name_kr ?? null,
+    homeName: match.home_team?.name_kr ?? null,
+    awayName: match.away_team?.name_kr ?? null,
+    totalLine: parseLineNumber(rawCombos.find(c => c.bet_type === 'under_over')?.line_value),
+    handicapLine: (() => {
+      const hv = parseLineNumber(rawCombos.find(c => c.bet_type === 'handicap')?.line_value);
+      return hv == null ? null : Math.abs(hv);
+    })(),
+  });
+
+
 
   // 최신 분석 결과 — useEffect 의존성 배열보다 먼저 선언해야 함
   const analysis = analysisHistory.length > 0 ? analysisHistory[analysisHistory.length - 1] : null;
@@ -1212,8 +1247,7 @@ function MatchBetmanRow({
 
   const accentLine = isLive ? C.accent : isDone ? C.muted : C.blue;
 
-  // bet_combos 가 있으면 사용, 없으면 latest_odds로 승무패 폴백 (getPcts에서 필요하므로 먼저 선언)
-  const rawCombos = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
+
 
   // 베팅 유형별 확률 매핑
   const allHandicapCombos = rawCombos.filter(c => c.bet_type === 'handicap');
@@ -1223,10 +1257,9 @@ function MatchBetmanRow({
       case 'match_winner':
         return [analysis.home_win_pct, analysis.draw_pct, analysis.away_win_pct];
       case 'handicap': {
-        // ─── 라인 값 파싱 — 승1패는 H-1과 동일하게 1.0 처리 ───
+        // ─── 라인 값 파싱 (승1패/승5패는 margin 타입으로 분리됨) ───
         const parseLineNum = (lv: string | null | undefined) => {
           if (!lv) return 0;
-          if (lv.includes('승1패')) return 1.0;
           const n = parseFloat(lv.replace(/[^0-9.]/g, '') || '0');
           return isNaN(n) ? 0 : n;
         };
@@ -1282,6 +1315,20 @@ function MatchBetmanRow({
         }
         const d = Math.max(0, 100 - h - a);
         return [h, d, a];
+      }
+      case 'margin': {
+        // 승1패(야구) / 승5패(농구) — 승 / 가운데(임계값 이내) / 패
+        const mh = analysis.margin_home_pct, mm = analysis.margin_mid_pct, ma = analysis.margin_away_pct;
+        if (mh != null || mm != null || ma != null) {
+          return [mh ?? 0, mm ?? 0, ma ?? 0];
+        }
+        // AI가 margin 값을 못 낸 경우 배당 역산으로 표시
+        const rh = combo.home_odds ? 1 / combo.home_odds : 0;
+        const rd = combo.draw_odds ? 1 / combo.draw_odds : 0;
+        const ra = combo.away_odds ? 1 / combo.away_odds : 0;
+        const tot = rh + rd + ra;
+        if (tot === 0) return [0, 0, 0];
+        return [Math.round(rh / tot * 100), Math.round(rd / tot * 100), Math.round(ra / tot * 100)];
       }
       case 'under_over':
         return [analysis.under_pct ?? 0, analysis.over_pct ?? 0];
@@ -1683,7 +1730,7 @@ function TeamBlock({ team, score, isWinner, isDone }: { team: { name_kr: string;
 // ── OCR 결과 타입 ──
 type OcrBetType = {
   combo_no?: number | null;
-  type: 'match_winner' | 'handicap' | 'under_over' | 'sum' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over';
+  type: 'match_winner' | 'handicap' | 'margin' | 'under_over' | 'sum' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over';
   label?: string;
   line_value?: string | null;
   home_odds?: number | null;
@@ -1709,7 +1756,7 @@ type OcrMatch = {
 
 // ── 베팅 조합 타입 ──
 type BetCombo = {
-  bet_type: 'match_winner' | 'handicap' | 'under_over' | 'sum' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over';
+  bet_type: 'match_winner' | 'handicap' | 'margin' | 'under_over' | 'sum' | 'ht_match_winner' | 'ht_handicap' | 'ht_under_over';
   betman_combo_no: number | null;
   bet_label: string;
   line_value?: string | null;
