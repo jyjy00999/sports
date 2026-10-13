@@ -262,8 +262,17 @@ function EmptyState({ icon, text, sub }: { icon: string; text: string; sub: stri
 }
 
 // ── 배당 버튼 ──
+// ── 경기 내 확률 순위별 색상 (상위 5위까지 구분) ──────────────
+const RANK_STYLES: Record<number, { bg: string; border: string; text: string; badge: string; label: string }> = {
+  1: { bg: '#FFF4D1', border: '#E6B422', text: '#8A6A00', badge: '#E6B422', label: '1위' },
+  2: { bg: '#F0F1F4', border: '#9AA3AF', text: '#50575F', badge: '#9AA3AF', label: '2위' },
+  3: { bg: '#FBEEE2', border: '#C8803C', text: '#8A5420', badge: '#C8803C', label: '3위' },
+  4: { bg: '#E8F1FD', border: '#5B8DD9', text: '#2C5894', badge: '#5B8DD9', label: '4위' },
+  5: { bg: '#EFEAFA', border: '#8B72D4', text: '#54419B', badge: '#8B72D4', label: '5위' },
+};
+
 function OddsButton({
-  label, value, color, pct, isBest, isExpected,
+  label, value, color, pct, isBest, isExpected, rank,
 }: {
   label: string;
   value: number | null;
@@ -272,27 +281,31 @@ function OddsButton({
   isBest?: boolean;
   /** 예상 스코어가 이 항목에 해당하는가 */
   isExpected?: boolean;
+  /** 경기 전체 항목 중 확률 순위 (1~5만 색 구분) */
+  rank?: number;
 }) {
   const C = useC();
   const has = value != null;
+  const rs = rank != null && rank <= 5 ? RANK_STYLES[rank] : undefined;
   const hi = isBest && pct !== undefined;
-  const displayColor = hi ? C.blue : color;
+  const displayColor = rs ? rs.text : hi ? C.blue : color;
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
       padding: '8px 4px', borderRadius: 6, cursor: 'default',
-      border: `1px solid ${hi ? C.blue + 'CC' : isExpected ? C.accent + 'AA' : has ? color + '55' : C.border}`,
-      background: hi ? `${C.blue}22` : has ? `${color}0D` : C.surface,
+      border: `2px solid ${rs ? rs.border : isExpected ? C.accent + 'AA' : has ? color + '55' : C.border}`,
+      background: rs ? rs.bg : has ? `${color}0D` : C.surface,
       minWidth: 56, maxWidth: 120,
       transition: 'all 0.25s',
       position: 'relative',
     }}>
-      {hi && (
+      {rs && (
         <span style={{
-          position: 'absolute', top: -8, left: '50%', transform: 'translateX(-50%)',
-          fontSize: 9, fontWeight: 800, color: '#fff',
-          background: C.blue, borderRadius: 4, padding: '1px 5px', whiteSpace: 'nowrap',
-        }}>BEST</span>
+          position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)',
+          fontSize: 10, fontWeight: 800, color: '#fff',
+          background: rs.badge, borderRadius: 4, padding: '1px 7px', whiteSpace: 'nowrap',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.18)',
+        }}>{rs.label}</span>
       )}
       {isExpected && (
         <span title="예상 스코어가 이 항목에 해당합니다" style={{
@@ -301,14 +314,14 @@ function OddsButton({
           background: C.accent, borderRadius: 4, padding: '1px 5px', whiteSpace: 'nowrap',
         }}>예상</span>
       )}
-      <span style={{ fontSize: 11, color: hi ? C.blue : C.muted, marginBottom: 2, fontWeight: hi ? 800 : 600 }}>{label}</span>
+      <span style={{ fontSize: 11, color: rs ? rs.text : C.muted, marginBottom: 2, fontWeight: rs ? 800 : 600 }}>{label}</span>
       <span style={{ fontSize: 15, fontWeight: 800, color: has ? displayColor : C.muted, fontFamily: 'JetBrains Mono, monospace' }}>
         {has ? value!.toFixed(2) : '-'}
       </span>
       {pct !== undefined && (
         <span style={{
           fontSize: 12, fontWeight: 800,
-          color: hi ? C.blue : C.muted,
+          color: rs ? rs.text : C.muted,
           marginTop: 3,
         }}>
           {pct}%
@@ -320,7 +333,7 @@ function OddsButton({
 
 // ── 개별 베팅 유형 행 ──
 function BetRow({
-  combo, isFirst, analyzing, analyzed, pcts, implied, onAnalyze,
+  combo, isFirst, analyzing, analyzed, pcts, implied, ranks, onAnalyze,
 }: {
   combo: BetCombo;
   isFirst: boolean;
@@ -329,6 +342,8 @@ function BetRow({
   pcts?: number[];          // [p1, p2, p3?] – 확률 배열
   /** 예상 스코어가 각 유형에서 가리키는 항목 */
   implied?: MatchAnalysis['implied'];
+  /** 경기 전체 확률 순위 [칸0, 칸1, 칸2] */
+  ranks?: Array<number | undefined>;
   onAnalyze: () => void;
 }) {
   const C = useC();
@@ -370,9 +385,9 @@ function BetRow({
       const thr = parseInt(combo.line_value?.match(/승\s*(\d+)\s*패/)?.[1] ?? '1', 10);
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label={`${thr + 1}점차+ 승`} value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
-          <OddsButton label={`${thr}점차 이내`}    value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
-          <OddsButton label={`${thr + 1}점차+ 패`} value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} />
+          <OddsButton label={`${thr + 1}점차+ 승`} value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} rank={ranks?.[0]} />
+          <OddsButton label={`${thr}점차 이내`}    value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} rank={ranks?.[1]} />
+          <OddsButton label={`${thr + 1}점차+ 패`} value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} rank={ranks?.[2]} />
         </div>
       );
     }
@@ -380,17 +395,17 @@ function BetRow({
         combo.bet_type === 'ht_match_winner' || combo.bet_type === 'ht_handicap') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="승" value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
-          <OddsButton label="무" value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
-          <OddsButton label="패" value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} />
+          <OddsButton label="승" value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} rank={ranks?.[0]} />
+          <OddsButton label="무" value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} rank={ranks?.[1]} />
+          <OddsButton label="패" value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} rank={ranks?.[2]} />
         </div>
       );
     }
     if (combo.bet_type === 'under_over' || combo.bet_type === 'ht_under_over') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="언더" value={combo.under_odds ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
-          <OddsButton label="오버" value={combo.over_odds  ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
+          <OddsButton label="언더" value={combo.under_odds ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} rank={ranks?.[0]} />
+          <OddsButton label="오버" value={combo.over_odds  ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} rank={ranks?.[1]} />
           <div style={{ flex: 1 }} />
         </div>
       );
@@ -398,8 +413,8 @@ function BetRow({
     if (combo.bet_type === 'sum') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="홀" value={combo.odd_odds  ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
-          <OddsButton label="짝" value={combo.even_odds ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
+          <OddsButton label="홀" value={combo.odd_odds  ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} rank={ranks?.[0]} />
+          <OddsButton label="짝" value={combo.even_odds ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} rank={ranks?.[1]} />
           <div style={{ flex: 1 }} />
         </div>
       );
@@ -1400,6 +1415,34 @@ function MatchBetmanRow({
     }
   };
 
+  // ── 경기 전체 항목을 확률 순으로 세워 1~5위 산출 ──────────────
+  // 승무패/핸디캡/언더오버/홀짝/마진의 모든 칸을 한 줄로 모아 비교한다.
+  // key = "조합인덱스-칸인덱스", value = 순위(1부터)
+  const globalRanks = (() => {
+    if (!analysis) return new Map<string, number>();
+    const entries: Array<{ key: string; pct: number }> = [];
+    (rawCombos.length > 0 ? rawCombos : []).forEach((combo, ci) => {
+      const pcts = getPcts(combo);
+      if (!pcts) return;
+      pcts.forEach((pct, oi) => {
+        // 배당이 없는 칸(예: 야구 승무패의 '무')은 베팅 자체가 불가하므로 제외
+        const odds = oi === 0
+          ? (combo.home_odds ?? combo.under_odds ?? combo.odd_odds)
+          : oi === 1
+            ? (combo.bet_type === 'under_over' || combo.bet_type === 'ht_under_over'
+                ? combo.over_odds
+                : combo.bet_type === 'sum' ? combo.even_odds : combo.draw_odds)
+            : combo.away_odds;
+        if (odds == null || pct <= 0) return;
+        entries.push({ key: `${ci}-${oi}`, pct });
+      });
+    });
+    entries.sort((a, b) => b.pct - a.pct);
+    const map = new Map<string, number>();
+    entries.forEach((e, i) => map.set(e.key, i + 1));
+    return map;
+  })();
+
   const displayCombos: BetCombo[] = rawCombos.length > 0
     ? rawCombos
     : match.latest_odds
@@ -1520,6 +1563,7 @@ function MatchBetmanRow({
               analyzed={analysis !== null}
               pcts={getPcts(combo)}
               implied={analysis?.implied}
+              ranks={[0, 1, 2].map(oi => globalRanks.get(`${i}-${oi}`))}
               onAnalyze={() => onAnalyze(analysis !== null)}
             />
           ))
