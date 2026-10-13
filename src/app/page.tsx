@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, createContext, useContext } from 'react';
-import { detectSport, parseLineNumber } from '@/lib/sports-rules';
+import { detectSport, parseLineNumber, parseMarginThreshold } from '@/lib/sports-rules';
 import type { Match } from '@/types';
 
 // ── 색상 테마 ──
@@ -1208,6 +1208,7 @@ function MatchBetmanRow({
       const hv = parseLineNumber(rawCombos.find(c => c.bet_type === 'handicap')?.line_value);
       return hv == null ? null : Math.abs(hv);
     })(),
+    marginThreshold: parseMarginThreshold(rawCombos.find(c => c.bet_type === 'margin')?.line_value),
   });
 
 
@@ -2119,7 +2120,7 @@ export default function HomePage() {
     } catch (e) {
       setZentotoState('error');
       setZentotoMsg(e instanceof Error ? e.message : String(e));
-      setTimeout(() => { setZentotoState('idle'); setZentotoMsg(''); }, 5000);
+      setTimeout(() => { setZentotoState('idle'); setZentotoMsg(''); }, 12000);
     }
   };
 
@@ -2137,12 +2138,13 @@ export default function HomePage() {
         await fetchMatches();
         setTimeout(() => { setZentotoState('idle'); setZentotoMsg(''); }, 4000);
       } else {
-        throw new Error(d.message ?? '파싱 실패');
+        throw new Error(d.error ?? d.message ?? '파싱 실패');
       }
     } catch (e) {
       setZentotoState('error');
-      setZentotoMsg('수집 실패 — 잠시 후 다시 시도하세요');
-      setTimeout(() => { setZentotoState('idle'); setZentotoMsg(''); }, 5000);
+      // 실제 원인(DB 연결 불가 등)을 그대로 노출 — 기존엔 일반 문구로 가려졌음
+      setZentotoMsg(e instanceof Error ? e.message : String(e));
+      setTimeout(() => { setZentotoState('idle'); setZentotoMsg(''); }, 12000);
     }
   };
 

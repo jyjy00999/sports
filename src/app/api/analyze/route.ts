@@ -208,6 +208,7 @@ export async function POST(req: Request) {
     const betCombosForSport = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
     const uoForSport = betCombosForSport.find(c => c.bet_type === 'under_over');
     const hcForSport = betCombosForSport.find(c => c.bet_type === 'handicap');
+    const mgForSport = betCombosForSport.find(c => c.bet_type === 'margin');
     const sportKey: SportKey = detectSport({
       sportName: match.league?.sport?.name_kr ?? null,
       leagueName: (match.league as { name_kr?: string } | null)?.name_kr ?? null,
@@ -215,6 +216,7 @@ export async function POST(req: Request) {
       awayName: (match.away_team as { name_kr?: string } | null)?.name_kr ?? null,
       totalLine: parseLineNumber(uoForSport?.line_value),
       handicapLine: hcForSport?.line_value ? Math.abs(parseLineNumber(hcForSport.line_value) ?? 0) : null,
+      marginThreshold: parseMarginThreshold(mgForSport?.line_value),
     });
     const sport = sportKey === 'baseball' ? 'baseball' : sportKey === 'soccer' ? 'soccer' : sportKey;
     console.log(`[Analyze] 종목 감지: ${SPORT_RULES[sportKey].name} (${sportKey})`);

@@ -104,7 +104,15 @@ const BASEBALL_TEAM_HINTS = [
   '니혼햄', '오릭스', '베어스', '위즈', '다이노스', '랜더스', '히어로즈',
 ];
 
-const VOLLEYBALL_TEAM_HINTS = ['흥국생명', '현대건설', 'GS칼텍스', '정관장', 'IBK기업은행', '페퍼저축은행', '대한항공', '우리카드', 'OK금융', '삼성화재', 'KB손해보험', '한국전력'];
+// 주의: '정관장'은 배구(레드스파크스)와 농구(레드부스터스)에 모두 있으므로 구단명까지 명시
+const VOLLEYBALL_TEAM_HINTS = [
+  '흥국생명', '현대건설', 'GS칼텍스', 'IBK기업은행', '페퍼저축은행', '레드스파크스',
+  '대한항공', '우리카드', 'OK금융', '삼성화재', 'KB손해보험', '한국전력', '핑크스파이더스',
+];
+const BASKETBALL_TEAM_HINTS = [
+  '레드부스터스', '스카이거너스', '썬더스', 'DB프로미', 'KT소닉붐', 'SK나이츠',
+  'KCC이지스', '가스공사 페가수스', '삼성 썬더스', '현대모비스 피버스', '엘지 세이커스',
+];
 
 /**
  * 경기 정보로 종목 자동 감지.
@@ -119,8 +127,10 @@ export function detectSport(opts: {
   totalLine?: number | null;
   /** 핸디캡 라인값 (절대값 숫자) */
   handicapLine?: number | null;
+  /** 마진 유형 임계값 (승1패=1 → 야구, 승5패=5 → 농구). 종목 판별에 가장 강한 신호 */
+  marginThreshold?: number | null;
 }): SportKey {
-  const { leagueName, sportName, homeName, awayName, totalLine, handicapLine } = opts;
+  const { leagueName, sportName, homeName, awayName, totalLine, handicapLine, marginThreshold } = opts;
   const text = `${sportName ?? ''} ${leagueName ?? ''}`;
 
   // 1) 리그/종목명 명시 (가장 신뢰도 높음)
@@ -128,18 +138,28 @@ export function detectSport(opts: {
     if (keywords.some(k => text.includes(k))) return sport;
   }
 
-  // 2) 언더오버 라인 크기 — 종목별 범위로 1차 판정
+  // 2) 마진 유형 — 공식 규정상 승1패는 야구에만, 승5패는 농구에만 발매된다
+  //    (출처: sportstoto.co.kr 승5패 안내 / 2023 야구승1패 발매 안내)
+  if (marginThreshold === 1) return 'baseball';
+  if (marginThreshold === 5) return 'basketball';
+
+  // 3) 언더오버 라인 크기 — 종목별 범위로 1차 판정
   if (totalLine != null && totalLine > 0) {
     if (totalLine <= 4.5) return 'soccer';
     if (totalLine < 120) return 'baseball';
     // 120 이상: 농구(130~240)와 배구(150~210)가 겹침 → 핸디캡 단위로 구분
     //   농구 핸디캡은 점수(보통 3~20), 배구 핸디캡은 세트스코어(1.5 등 작은 값)
     if (totalLine > 215) return 'basketball';   // 배구 총득점이 215를 넘기는 매우 드묾
+    // 팀명이 확실하면 핸디캡 크기보다 우선 (농구 핸디 2.5처럼 작은 값도 있음)
+    const teamsInRange = `${homeName ?? ''} ${awayName ?? ''}`;
+    if (BASKETBALL_TEAM_HINTS.some(v => teamsInRange.includes(v))) return 'basketball';
+    if (VOLLEYBALL_TEAM_HINTS.some(v => teamsInRange.includes(v))) return 'volleyball';
     if (handicapLine != null && handicapLine > 0) {
       return handicapLine >= 3 ? 'basketball' : 'volleyball';
     }
     // 핸디캡 정보가 없으면 팀명으로 재확인
     const t = `${homeName ?? ''} ${awayName ?? ''}`;
+    if (BASKETBALL_TEAM_HINTS.some(v => t.includes(v))) return 'basketball';
     if (VOLLEYBALL_TEAM_HINTS.some(v => t.includes(v))) return 'volleyball';
     // 한계: U/O만 150~215 구간이고 핸디캡·팀명 단서가 모두 없으면 구분 불가.
     // 국내 발매 빈도가 높은 농구를 기본값으로 둔다.

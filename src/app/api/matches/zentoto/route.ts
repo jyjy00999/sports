@@ -4,12 +4,52 @@
  */
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { detectSport, parseLineNumber, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
+import { detectSport, parseLineNumber, parseMarginThreshold, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!,
 );
+
+/**
+ * DB 도달 가능 여부를 먼저 확인한다.
+ * 이게 없으면 경기 수십 건마다 DNS 재시도가 반복돼 수집이 수 분간 멈춘다.
+ */
+async function assertDbReachable(): Promise<void> {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+    throw new Error('SUPABASE_URL 또는 SUPABASE_SERVICE_KEY 환경변수가 설정되지 않았습니다.');
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`${process.env.SUPABASE_URL}/rest/v1/sports?select=id&limit=1`, {
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_KEY!,
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+      },
+      signal: ctrl.signal,
+      cache: 'no-store',
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Supabase 인증 실패 — SUPABASE_SERVICE_KEY를 확인하세요.');
+    }
+    if (res.status === 404) {
+      throw new Error('sports 테이블이 없습니다 — supabase/schema.sql 을 SQL Editor에서 실행하세요.');
+    }
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e);
+    if (/abort|timeout/i.test(msg)) {
+      throw new Error(`Supabase 응답 시간 초과 (8초). 프로젝트가 일시정지되었는지 확인하세요.`);
+    }
+    if (/fetch failed|ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(msg)) {
+      const host = (() => { try { return new URL(process.env.SUPABASE_URL!).host; } catch { return process.env.SUPABASE_URL; } })();
+      throw new Error(`Supabase 서버에 연결할 수 없습니다 (${host}). 프로젝트가 삭제되었거나 URL이 잘못되었습니다.`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ── 리그/팀 생성 헬퍼 ──────────────────────────────────────
 async function findOrCreateLeague(name_kr: string, sportKey: SportKey = 'soccer') {
@@ -157,12 +197,14 @@ function guessSport(group: MatchGroup): SportKey {
 
   const uo = group.betTypes.find(b => b.type === 'under_over');
   const hc = group.betTypes.find(b => b.type === 'handicap');
+  const mg = group.betTypes.find(b => b.type === 'margin');
 
   return detectSport({
     homeName: group.baseName,
     awayName: group.awayName,
     totalLine: parseLineNumber(uo?.line_value),
     handicapLine: hc?.line_value ? Math.abs(parseLineNumber(hc.line_value) ?? 0) : null,
+    marginThreshold: parseMarginThreshold(mg?.line_value),
   });
 }
 
@@ -174,6 +216,9 @@ function guessLeague(group: MatchGroup): string {
 async function saveGroups(groups: MatchGroup[]) {
   let saved = 0, skipped = 0;
   const errors: string[] = [];
+
+  // DB가 죽어 있으면 즉시 중단 (경기마다 DNS 재시도로 수 분 멈추는 것 방지)
+  await assertDbReachable();
 
   for (const group of groups) {
     try {
@@ -307,7 +352,7 @@ export async function GET() {
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     console.error('[Zentoto GET]', err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: (err as Error)?.message ?? String(err) }, { status: 500 });
   }
 }
 
@@ -323,6 +368,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
     console.error('[Zentoto POST]', err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    return NextResponse.json({ error: (err as Error)?.message ?? String(err) }, { status: 500 });
   }
 }
