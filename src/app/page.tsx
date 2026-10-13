@@ -1420,10 +1420,34 @@ function MatchBetmanRow({
   // key = "조합인덱스-칸인덱스", value = 순위(1부터)
   const globalRanks = (() => {
     if (!analysis) return new Map<string, number>();
-    const entries: Array<{ key: string; pct: number }> = [];
+    const im = analysis.implied;
+    // 예상 스코어가 가리키는 칸 인덱스 (동률 시 우선순위에 사용)
+    const expectedIdxOf = (combo: BetCombo): number => {
+      if (!im) return -1;
+      switch (combo.bet_type) {
+        case 'match_winner':
+        case 'ht_match_winner':
+          return im.match_winner === 'home' ? 0 : im.match_winner === 'draw' ? 1 : 2;
+        case 'handicap':
+        case 'ht_handicap':
+          return im.handicap == null ? -1 : im.handicap === 'home' ? 0 : im.handicap === 'draw' ? 1 : 2;
+        case 'margin':
+          return im.margin == null ? -1 : im.margin === 'home' ? 0 : im.margin === 'mid' ? 1 : 2;
+        case 'under_over':
+        case 'ht_under_over':
+          return im.under_over == null ? -1 : im.under_over === 'under' ? 0 : 1;
+        case 'sum':
+          return im.sum === 'odd' ? 0 : 1;
+        default:
+          return -1;
+      }
+    };
+
+    const entries: Array<{ key: string; pct: number; isExpected: boolean; odds: number }> = [];
     (rawCombos.length > 0 ? rawCombos : []).forEach((combo, ci) => {
       const pcts = getPcts(combo);
       if (!pcts) return;
+      const expIdx = expectedIdxOf(combo);
       pcts.forEach((pct, oi) => {
         // 배당이 없는 칸(예: 야구 승무패의 '무')은 베팅 자체가 불가하므로 제외
         const odds = oi === 0
@@ -1434,10 +1458,16 @@ function MatchBetmanRow({
                 : combo.bet_type === 'sum' ? combo.even_odds : combo.draw_odds)
             : combo.away_odds;
         if (odds == null || pct <= 0) return;
-        entries.push({ key: `${ci}-${oi}`, pct });
+        entries.push({ key: `${ci}-${oi}`, pct, isExpected: oi === expIdx, odds });
       });
     });
-    entries.sort((a, b) => b.pct - a.pct);
+
+    // 확률 내림차순 → 동률이면 예상 스코어가 가리키는 쪽 → 그래도 같으면 배당 낮은 쪽
+    entries.sort((a, b) => {
+      if (b.pct !== a.pct) return b.pct - a.pct;
+      if (a.isExpected !== b.isExpected) return a.isExpected ? -1 : 1;
+      return a.odds - b.odds;
+    });
     const map = new Map<string, number>();
     entries.forEach((e, i) => map.set(e.key, i + 1));
     return map;
