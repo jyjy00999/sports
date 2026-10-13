@@ -163,22 +163,32 @@ function groupRows(rows: ZentotoRow[]): MatchGroup[] {
       g => g.baseName === row.baseName && g.awayName === row.awayName && g.matchDate === matchDate,
     );
     if (existing) {
-      // 홀/짝(sum)이 이미 등장한 이후의 콤보 = 5회(전반전) 베팅
+      // 홀/짝(sum)이 이미 등장한 이후의 콤보 = 전반 베팅
       const hasSumAlready = existing.betTypes.some(b => b.type === 'sum');
+      // 야구는 '5회', 그 외 종목은 '전반'으로 표기
+      const pre = existing.betTypes.some(b => b.type === 'margin' && /승\s*1\s*패/.test(b.line_value ?? ''))
+        ? '5회 ' : '전반 ';
       if (hasSumAlready) {
         if (betRow.type === 'match_winner') {
-          betRow.type = 'ht_match_winner'; betRow.label = '5회 ' + betRow.label;
+          betRow.type = 'ht_match_winner'; betRow.label = pre + betRow.label;
+        } else if (betRow.type === 'margin') {
+          // 젠토토는 전반 승무패에도 (승1패) suffix를 재사용한다.
+          // 전반 상품은 승무패/핸디캡/언더오버 3종뿐이고 전반 승1패는 존재하지 않으므로
+          // 홀/짝 이후에 나온 3지선다는 전반 승무패로 처리한다.
+          betRow.type = 'ht_match_winner';
+          betRow.label = pre + '승무패';
+          betRow.line_value = null;
         } else if (betRow.type === 'handicap') {
-          betRow.type = 'ht_handicap'; betRow.label = '5회 ' + betRow.label;
+          betRow.type = 'ht_handicap'; betRow.label = pre + betRow.label;
         } else if (betRow.type === 'under_over') {
-          betRow.type = 'ht_under_over'; betRow.label = '5회 ' + betRow.label;
+          betRow.type = 'ht_under_over'; betRow.label = pre + betRow.label;
         }
       } else if (betRow.type === 'under_over') {
         // sum 없이도 U/O 라인 ≤ 6.0이면 야구 5회 언더오버
         const lineNum = parseFloat((betRow.line_value ?? '').replace(/[^0-9.]/g, '') || '99');
         const alreadyHasUO = existing.betTypes.some(b => b.type === 'under_over');
         if (alreadyHasUO && lineNum <= 6.0) {
-          betRow.type = 'ht_under_over'; betRow.label = '5회 ' + betRow.label;
+          betRow.type = 'ht_under_over'; betRow.label = pre + betRow.label;
         }
       }
       existing.betTypes.push(betRow);
