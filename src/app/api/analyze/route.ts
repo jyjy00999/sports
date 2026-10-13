@@ -202,7 +202,10 @@ export async function POST(req: Request) {
     const awayAbsences = absences.filter(a => a.team_id === (match.away_team as { id?: string } | null)?.id);
 
     // 외부 데이터 병렬 수집 (결장자 + Sofascore)
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
+    // 내부 API 호출은 반드시 '자기 자신'을 향해야 한다.
+    // NEXT_PUBLIC_APP_URL(운영 주소)을 쓰면 로컬 개발 서버가 운영 서버를 호출해
+    // 구버전 코드의 응답을 받는 문제가 생긴다.
+    const baseUrl = new URL(req.url).origin;
     const withTimeout = (p: Promise<unknown>, ms: number) =>
       Promise.race([p, new Promise<null>((res) => setTimeout(() => res(null), ms))]);
 
@@ -243,6 +246,18 @@ export async function POST(req: Request) {
       h2h?: { homeWins: number; awayWins: number; draws: number };
       missing?: { home: Array<{name:string;injury:string;expectedReturn:string|null}>; away: Array<{name:string;injury:string;expectedReturn:string|null}> };
     } | null;
+
+    // 수집 결과를 로그로 남겨 데이터 누락을 바로 확인할 수 있게 한다
+    {
+      const ph = (pitchers?.home as { name?: string } | null)?.name;
+      const pa = (pitchers?.away as { name?: string } | null)?.name;
+      console.log(
+        `[Analyze] 데이터 수집 — 투수: ${ph ?? '없음'} vs ${pa ?? '없음'}` +
+        ` / 결장자DB: 홈 ${homeAbsences.length}건, 원정 ${awayAbsences.length}건` +
+        ` / 외부부상: ${injuries ? '수신' : '없음'}` +
+        ` / Sofascore: ${sofascore ? '수신' : '없음'}`,
+      );
+    }
 
     const betCombos = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
     const prompt = buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries, sofascore, sportKey });
@@ -376,12 +391,12 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
   const homeAbsList = homeAbsences.map((a: Record<string, unknown>) => {
     const p = a.player as Record<string, unknown> | undefined;
     return `  - ${p?.name_en ?? '알 수 없음'} (${a.type}: ${a.reason ?? '-'})`;
-  }).join('\n') || '  없음';
+  }).join('\n') || '  ※ 결장자 정보 미수집 (등록된 데이터 없음 — 결장자가 없다는 뜻이 아님)';
 
   const awayAbsList = awayAbsences.map((a: Record<string, unknown>) => {
     const p = a.player as Record<string, unknown> | undefined;
     return `  - ${p?.name_en ?? '알 수 없음'} (${a.type}: ${a.reason ?? '-'})`;
-  }).join('\n') || '  없음';
+  }).join('\n') || '  ※ 결장자 정보 미수집 (등록된 데이터 없음 — 결장자가 없다는 뜻이 아님)';
 
   const mw    = betCombos.find(c => c.bet_type === 'match_winner');
   const hc    = betCombos.find(c => c.bet_type === 'handicap');
@@ -433,9 +448,9 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
   let extInjurySection = '';
   if (injuries && (injuries.home || injuries.away)) {
     const fmt = (t: Record<string,unknown> | null) => {
-      if (!t) return '  정보 없음';
+      if (!t) return '  ※ 정보 미수집 (결장자가 없다는 뜻이 아님)';
       const players = (t.players as Array<{ name: string; injury: string; status: string; chanceOfPlaying: number | null }>) ?? [];
-      if (players.length === 0) return '  부상/결장자 없음';
+      if (players.length === 0) return '  부상/결장자 없음 (출처에서 확인됨)';
       return players.map(p => {
         const chance = p.chanceOfPlaying != null ? ` (출전 가능성 ${p.chanceOfPlaying}%)` : '';
         return `  - ${p.name}: ${p.injury} [${p.status}]${chance}`;
@@ -590,7 +605,10 @@ ${sportSpecificFields}
    - 부상자·결장자 명단과 그 선수가 전력에서 차지하는 비중
    - 상대전적(H2H) 과 최근 경기 폼
    - 배당률이 말하는 시장의 판단
-   데이터가 없는 항목은 "없음"으로 명시하고, 있는 척 지어내지 말 것.
+   ★ "미수집"으로 표시된 항목은 사실을 모른다는 뜻이다.
+     이를 "결장자가 없다", "양팀 모두 베스트 멤버다" 처럼 단정하면 명백한 오류다.
+     모르는 항목은 분석 글에서도 "정보 미확인"이라고 밝히고, 배당 등 다른 근거로 보완하라.
+     반대로 "출처에서 확인됨"이라 적힌 항목만 사실로 단정할 수 있다.
 
 2단계: 1단계를 종합해 "각 스코어가 나올 확률"을 score_distribution 으로 적는다.
    - 가능성 높은 스코어 8~14개를 확률과 함께 나열한다

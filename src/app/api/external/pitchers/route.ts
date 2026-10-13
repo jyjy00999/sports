@@ -138,12 +138,19 @@ async function fetchMLBTeamBatting(teamId: number): Promise<TeamBattingStats | n
 // ── MLB 선발 + 성적 + 팀 타격 통계 조회 ────────────────────────────
 async function fetchMLBPitchers(homeKr: string, awayKr: string, matchDate: string): Promise<MatchPitchers> {
   try {
-    const dateStr = matchDate.slice(0, 10);
-    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${dateStr}&hydrate=probablePitcher,teams`;
+    // MLB 일정은 미국 현지 날짜 기준이다.
+    // 한국시간 오전 경기는 현지로 전날이므로, 하루 전~당일 구간을 조회해 매칭한다.
+    // (예: KST 10/14 09:00 = ET 10/13 20:00 → MLB 일정상 10/13)
+    const d = new Date(matchDate);
+    const endStr = d.toISOString().slice(0, 10);
+    const startStr = new Date(d.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${startStr}&endDate=${endStr}&hydrate=probablePitcher,teams`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return { home: null, away: null, leagueType: 'MLB' };
     const data = await res.json();
-    const games: unknown[] = data.dates?.[0]?.games ?? [];
+    // 구간 내 모든 날짜의 경기를 한 배열로 합친다
+    const games: unknown[] = ((data.dates ?? []) as Array<{ games?: unknown[] }>)
+      .flatMap(dt => dt.games ?? []);
 
     const homeKw = krToMlbKw(homeKr);
     const awayKw = krToMlbKw(awayKr);
