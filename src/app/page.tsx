@@ -307,6 +307,16 @@ function OddsButton({
           boxShadow: '0 1px 3px rgba(0,0,0,0.18)',
         }}>{rs.label}</span>
       )}
+      {/* 예상 항목이 상위 5위 밖이면 순위를 흐린 배지로 따로 보여준다
+          (배지가 전혀 없으면 무시된 항목처럼 보이기 때문) */}
+      {!rs && isExpected && rank != null && (
+        <span title={`전체 ${rank}위`} style={{
+          position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)',
+          fontSize: 10, fontWeight: 800, color: C.muted,
+          background: C.surface, border: `1px solid ${C.border}`,
+          borderRadius: 4, padding: '0 6px', whiteSpace: 'nowrap',
+        }}>{rank}위</span>
+      )}
       {isExpected && (
         <span title="예상 스코어가 이 항목에 해당합니다" style={{
           position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)',
