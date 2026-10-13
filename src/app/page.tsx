@@ -263,13 +263,15 @@ function EmptyState({ icon, text, sub }: { icon: string; text: string; sub: stri
 
 // ── 배당 버튼 ──
 function OddsButton({
-  label, value, color, pct, isBest,
+  label, value, color, pct, isBest, isExpected,
 }: {
   label: string;
   value: number | null;
   color: string;
   pct?: number;
   isBest?: boolean;
+  /** 예상 스코어가 이 항목에 해당하는가 */
+  isExpected?: boolean;
 }) {
   const C = useC();
   const has = value != null;
@@ -279,7 +281,7 @@ function OddsButton({
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
       padding: '8px 4px', borderRadius: 6, cursor: 'default',
-      border: `1px solid ${hi ? C.blue + 'CC' : has ? color + '55' : C.border}`,
+      border: `1px solid ${hi ? C.blue + 'CC' : isExpected ? C.accent + 'AA' : has ? color + '55' : C.border}`,
       background: hi ? `${C.blue}22` : has ? `${color}0D` : C.surface,
       minWidth: 56, maxWidth: 120,
       transition: 'all 0.25s',
@@ -291,6 +293,13 @@ function OddsButton({
           fontSize: 9, fontWeight: 800, color: '#fff',
           background: C.blue, borderRadius: 4, padding: '1px 5px', whiteSpace: 'nowrap',
         }}>BEST</span>
+      )}
+      {isExpected && (
+        <span title="예상 스코어가 이 항목에 해당합니다" style={{
+          position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)',
+          fontSize: 9, fontWeight: 800, color: '#fff',
+          background: C.accent, borderRadius: 4, padding: '1px 5px', whiteSpace: 'nowrap',
+        }}>예상</span>
       )}
       <span style={{ fontSize: 11, color: hi ? C.blue : C.muted, marginBottom: 2, fontWeight: hi ? 800 : 600 }}>{label}</span>
       <span style={{ fontSize: 15, fontWeight: 800, color: has ? displayColor : C.muted, fontFamily: 'JetBrains Mono, monospace' }}>
@@ -311,13 +320,15 @@ function OddsButton({
 
 // ── 개별 베팅 유형 행 ──
 function BetRow({
-  combo, isFirst, analyzing, analyzed, pcts, onAnalyze,
+  combo, isFirst, analyzing, analyzed, pcts, implied, onAnalyze,
 }: {
   combo: BetCombo;
   isFirst: boolean;
   analyzing: boolean;
   analyzed: boolean;
   pcts?: number[];          // [p1, p2, p3?] – 확률 배열
+  /** 예상 스코어가 각 유형에서 가리키는 항목 */
+  implied?: MatchAnalysis['implied'];
   onAnalyze: () => void;
 }) {
   const C = useC();
@@ -327,15 +338,41 @@ function BetRow({
   const bestIdx = pcts && maxPct > 0 ? pcts.indexOf(maxPct) : -1;
   const isBest = (i: number) => i === bestIdx;
 
+  // 예상 스코어가 이 행의 몇 번째 칸에 해당하는지
+  const expectedIdx = (() => {
+    if (!implied) return -1;
+    switch (combo.bet_type) {
+      case 'match_winner':
+      case 'ht_match_winner':
+        return implied.match_winner === 'home' ? 0 : implied.match_winner === 'draw' ? 1 : 2;
+      case 'handicap':
+      case 'ht_handicap':
+        if (!implied.handicap) return -1;
+        return implied.handicap === 'home' ? 0 : implied.handicap === 'draw' ? 1 : 2;
+      case 'margin':
+        if (!implied.margin) return -1;
+        return implied.margin === 'home' ? 0 : implied.margin === 'mid' ? 1 : 2;
+      case 'under_over':
+      case 'ht_under_over':
+        if (!implied.under_over) return -1;
+        return implied.under_over === 'under' ? 0 : 1;
+      case 'sum':
+        return implied.sum === 'odd' ? 0 : 1;
+      default:
+        return -1;
+    }
+  })();
+  const isExp = (i: number) => i === expectedIdx;
+
   const renderOdds = () => {
     // 승1패(야구) / 승5패(농구) — 가운데는 '무'가 아니라 'N점차 이내'(무승부 포함)
     if (combo.bet_type === 'margin') {
       const thr = parseInt(combo.line_value?.match(/승\s*(\d+)\s*패/)?.[1] ?? '1', 10);
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label={`${thr + 1}점차+ 승`} value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} />
-          <OddsButton label={`${thr}점차 이내`}    value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} />
-          <OddsButton label={`${thr + 1}점차+ 패`} value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} />
+          <OddsButton label={`${thr + 1}점차+ 승`} value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
+          <OddsButton label={`${thr}점차 이내`}    value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
+          <OddsButton label={`${thr + 1}점차+ 패`} value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} />
         </div>
       );
     }
@@ -343,17 +380,17 @@ function BetRow({
         combo.bet_type === 'ht_match_winner' || combo.bet_type === 'ht_handicap') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="승" value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} />
-          <OddsButton label="무" value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} />
-          <OddsButton label="패" value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} />
+          <OddsButton label="승" value={combo.home_odds ?? null} color={C.blue}  pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
+          <OddsButton label="무" value={combo.draw_odds ?? null} color={C.muted} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
+          <OddsButton label="패" value={combo.away_odds ?? null} color={C.warn}  pct={pcts?.[2]} isBest={isBest(2)} isExpected={isExp(2)} />
         </div>
       );
     }
     if (combo.bet_type === 'under_over' || combo.bet_type === 'ht_under_over') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="언더" value={combo.under_odds ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} />
-          <OddsButton label="오버" value={combo.over_odds  ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} />
+          <OddsButton label="언더" value={combo.under_odds ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
+          <OddsButton label="오버" value={combo.over_odds  ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
           <div style={{ flex: 1 }} />
         </div>
       );
@@ -361,8 +398,8 @@ function BetRow({
     if (combo.bet_type === 'sum') {
       return (
         <div style={{ flex: 1, display: 'flex', gap: 8, paddingTop: pcts ? 10 : 0 }}>
-          <OddsButton label="홀" value={combo.odd_odds  ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} />
-          <OddsButton label="짝" value={combo.even_odds ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} />
+          <OddsButton label="홀" value={combo.odd_odds  ?? null} color={C.blue} pct={pcts?.[0]} isBest={isBest(0)} isExpected={isExp(0)} />
+          <OddsButton label="짝" value={combo.even_odds ?? null} color={C.warn} pct={pcts?.[1]} isBest={isBest(1)} isExpected={isExp(1)} />
           <div style={{ flex: 1 }} />
         </div>
       );
@@ -437,6 +474,16 @@ type MatchAnalysis = {
   home_win_pct: number; draw_pct: number; away_win_pct: number;
   expected_score?: string;
   handicap_home_pct?: number; handicap_draw_pct?: number; handicap_away_pct?: number;
+  /** AI가 예측한 스코어 분포 */
+  score_distribution?: Array<{ home: number; away: number; prob: number }>;
+  /** 예상 스코어가 각 유형에서 가리키는 항목 */
+  implied?: {
+    match_winner: 'home' | 'draw' | 'away';
+    handicap: 'home' | 'draw' | 'away' | null;
+    under_over: 'under' | 'over' | null;
+    sum: 'odd' | 'even';
+    margin: 'home' | 'mid' | 'away' | null;
+  };
   // 승1패(야구) / 승5패(농구) — 핸디캡과 다른 '점수차 이내' 마진 유형
   margin_home_pct?: number | null; margin_mid_pct?: number | null; margin_away_pct?: number | null;
   under_pct?: number; over_pct?: number;
@@ -1472,6 +1519,7 @@ function MatchBetmanRow({
               analyzing={analyzing}
               analyzed={analysis !== null}
               pcts={getPcts(combo)}
+              implied={analysis?.implied}
               onAnalyze={() => onAnalyze(analysis !== null)}
             />
           ))

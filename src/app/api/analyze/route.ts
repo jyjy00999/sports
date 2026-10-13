@@ -9,6 +9,7 @@
 export const maxDuration = 120;
 import { NextResponse } from 'next/server';
 import { detectSport, parseLineNumber, parseHandicapValue, buildSportRulesPrompt, parseMarginThreshold, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
+import { deriveMarkets, type ScoreProb } from '@/lib/score-model';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { getCachedAnalysis, saveAnalysis, getMatchAbsences } from '@/lib/supabase';
@@ -225,9 +226,9 @@ export async function POST(req: Request) {
 
     const [injuriesData, sofascoreData, pitchersData] = await Promise.allSettled([
       withTimeout(fetch(`${baseUrl}/api/external/injuries?match_id=${match.id}`).then(r => r.ok ? r.json() : null), 5000),
-      // Sofascore: 축구만
-      sport === 'soccer' && homeEn && awayEn
-        ? withTimeout(fetch(`${baseUrl}/api/external/sofascore?home=${homeEn}&away=${awayEn}&sport=soccer`).then(r => r.ok ? r.json() : null), 10000)
+      // Sofascore: 전 종목 (상대전적 / 최근폼 / 결장자)
+      homeEn && awayEn
+        ? withTimeout(fetch(`${baseUrl}/api/external/sofascore?home=${homeEn}&away=${awayEn}&sport=${sportKey}`).then(r => r.ok ? r.json() : null), 10000)
         : Promise.resolve(null),
       // 야구: 선발 투수 성적 (MLB/KBO/NPB 자동 감지)
       sport === 'baseball'
@@ -253,126 +254,75 @@ export async function POST(req: Request) {
 
     const result: AIAnalysis = JSON.parse(jsonMatch[0]);
 
-    // ── 일관성 후처리 1: 예상스코어 ↔ 언더오버 모순 수정 ──────────────
-    if (result.expected_score && result.under_pct != null && result.over_pct != null) {
-      const scoreMatch = result.expected_score.match(/(\d+)[:\-](\d+)/);
-      if (scoreMatch) {
-        const totalScore = parseInt(scoreMatch[1]) + parseInt(scoreMatch[2]);
-        // 실제 배당 라인값 사용 (야구=5.5, 축구=2.5 등 실제 값)
-        const uoBet = betCombos.find((c: BetCombo) => c.bet_type === 'under_over');
-        const line = uoBet?.line_value ? parseFloat(String(uoBet.line_value)) : 2.5;
-        if (totalScore <= line && result.over_pct > result.under_pct) {
-          [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
-          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalScore}≤${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
-        } else if (totalScore > line && result.under_pct > result.over_pct) {
-          [result.under_pct, result.over_pct] = [result.over_pct, result.under_pct];
-          console.log(`[Analyze] 일관성 교정: 예상${result.expected_score}(${totalScore}>${line}) → 언더${result.under_pct}%/오버${result.over_pct}%`);
-        }
-      }
-    }
-
-    // ── 일관성 후처리 2: 종목 규정 기반 확률 교정 ──────────────────
-    // 공식 규정: https://www.sportstoto.co.kr/proto_rules.php
+    // ── 예상 스코어 분포 → 전 베팅 유형 확률 계산 ────────────────
+    // AI는 "각 스코어 확률"만 예측하고, 유형별 확률은 여기서 기계적으로 도출한다.
+    // 이 구조에서는 유형 간 모순(핸디 승+무 ≠ 승무패 승 등)이 발생할 수 없다.
     const rule = SPORT_RULES[sportKey];
-    const clampPct = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
+    const uoLine = parseLineNumber(betCombos.find((c: BetCombo) => c.bet_type === 'under_over')?.line_value);
+    const hcValue = parseHandicapValue(betCombos.find((c: BetCombo) => c.bet_type === 'handicap')?.line_value);
+    const mgThreshold = parseMarginThreshold(betCombos.find((c: BetCombo) => c.bet_type === 'margin')?.line_value);
 
-    // (a) 무승부 없는 종목(야구/농구/배구)은 draw_pct 강제 0
-    if (!rule.hasDraw) {
-      if ((result.draw_pct ?? 0) > 0) {
+    const rawDist = (result as unknown as { score_distribution?: ScoreProb[] }).score_distribution;
+    const derived = Array.isArray(rawDist) && rawDist.length > 0
+      ? deriveMarkets(rawDist, {
+          handicapValue: hcValue,
+          totalLine: uoLine,
+          marginThreshold: mgThreshold,
+          hasDraw: rule.hasDraw,
+        })
+      : null;
+
+    if (derived) {
+      console.log(`[Analyze] 스코어 분포 ${rawDist!.length}개 → 예상 ${derived.expected_score} (${rule.name})`);
+      result.home_win_pct = derived.home_win_pct;
+      result.draw_pct     = derived.draw_pct;
+      result.away_win_pct = derived.away_win_pct;
+      result.expected_score = derived.expected_score;
+      result.winner_team = derived.implied.match_winner;
+      if (hcValue != null) {
+        result.handicap_home_pct = derived.handicap_home_pct;
+        result.handicap_draw_pct = derived.handicap_draw_pct;
+        result.handicap_away_pct = derived.handicap_away_pct;
+      }
+      if (uoLine != null) {
+        result.under_pct = derived.under_pct;
+        result.over_pct  = derived.over_pct;
+      }
+      result.odd_pct  = derived.odd_pct;
+      result.even_pct = derived.even_pct;
+      if (mgThreshold != null) {
+        result.margin_home_pct = derived.margin_home_pct;
+        result.margin_mid_pct  = derived.margin_mid_pct;
+        result.margin_away_pct = derived.margin_away_pct;
+      }
+      // 예상 스코어가 각 유형에서 가리키는 항목 (UI에서 '예상' 배지로 표시)
+      result.implied = derived.implied;
+    } else {
+      // 분포가 없을 때만 최소 보정 (구 모델 응답 대비)
+      console.warn('[Analyze] score_distribution 없음 → AI가 적은 확률을 그대로 사용');
+      if (!rule.hasDraw && (result.draw_pct ?? 0) > 0) {
         const d = result.draw_pct ?? 0;
-        console.log(`[Analyze] ${rule.name}는 무승부 없음 → draw_pct ${d}% → 0%`);
-        result.draw_pct = 0;
-        // 홈/원정에 비례 배분
         const h = result.home_win_pct ?? 50, a = result.away_win_pct ?? 50;
         const tot = h + a;
+        result.draw_pct = 0;
         if (tot > 0) {
-          result.home_win_pct = clampPct(h + d * (h / tot));
-          result.away_win_pct = clampPct(100 - result.home_win_pct);
-        }
-      }
-      if ((result.ht_draw_pct ?? 0) > 0) {
-        const d = result.ht_draw_pct ?? 0;
-        result.ht_draw_pct = 0;
-        const h = result.ht_home_win_pct ?? 50, a = result.ht_away_win_pct ?? 50;
-        const tot = h + a;
-        if (tot > 0) {
-          result.ht_home_win_pct = clampPct(h + d * (h / tot));
-          result.ht_away_win_pct = clampPct(100 - result.ht_home_win_pct);
+          result.home_win_pct = Math.round(h + d * (h / tot));
+          result.away_win_pct = 100 - result.home_win_pct;
         }
       }
     }
 
-    const homeWin = result.home_win_pct ?? 50;
-    const awayWin = result.away_win_pct ?? 50;
-
-    // (b) 마진 유형(승1패/승5패) 교정
-    //     승 = 홈이 (임계값+1)점차 이상 승 → 승무패 홈승의 부분집합
-    //     중간 = 임계값 이내 차(무승부 포함)
-    //     패 = 원정이 (임계값+1)점차 이상 승 → 승무패 원정승의 부분집합
-    const marginBet = betCombos.find((c: BetCombo) => c.bet_type === 'margin');
-    if (marginBet && result.margin_home_pct != null && result.margin_away_pct != null) {
-      let mh = clampPct(result.margin_home_pct);
-      let ma = clampPct(result.margin_away_pct);
-      let changed = false;
-      if (mh > homeWin) { console.log(`[Analyze] 마진 교정: 승 ${mh}% → ${homeWin}% (승무패 홈승 초과 불가)`); mh = homeWin; changed = true; }
-      if (ma > awayWin) { console.log(`[Analyze] 마진 교정: 패 ${ma}% → ${awayWin}% (승무패 원정승 초과 불가)`); ma = awayWin; changed = true; }
-      if (mh + ma > 100) { const sc = 100 / (mh + ma); mh = clampPct(mh * sc); ma = clampPct(ma * sc); changed = true; }
-      if (changed || result.margin_mid_pct == null) {
-        result.margin_home_pct = mh;
-        result.margin_away_pct = ma;
-        result.margin_mid_pct = clampPct(100 - mh - ma);
+    // 전반전(ht_*)은 분포로 계산되지 않으므로 종목 규칙만 적용
+    if (!rule.hasDraw && (result.ht_draw_pct ?? 0) > 0) {
+      const d = result.ht_draw_pct ?? 0;
+      const h = result.ht_home_win_pct ?? 50, a = result.ht_away_win_pct ?? 50;
+      const tot = h + a;
+      result.ht_draw_pct = 0;
+      if (tot > 0) {
+        result.ht_home_win_pct = Math.round(h + d * (h / tot));
+        result.ht_away_win_pct = 100 - result.ht_home_win_pct;
       }
     }
-
-    // (c) 핸디캡 교정 — 핸디캡 부호로 방향 판정 (배당 비교가 아니라 규정대로)
-    //     H+X (홈 유리): handicap_home_pct > home_win_pct, handicap_away_pct < away_win_pct
-    //     H-X (홈 불리): handicap_home_pct < home_win_pct, handicap_away_pct > away_win_pct
-    const hcBet = betCombos.find((c: BetCombo) => c.bet_type === 'handicap');
-    if (hcBet && result.handicap_home_pct != null && result.handicap_away_pct != null) {
-      const hcVal = parseHandicapValue(hcBet.line_value);
-      const hcHomeOdds = hcBet.home_odds ? parseFloat(String(hcBet.home_odds)) : null;
-      const hcAwayOdds = hcBet.away_odds ? parseFloat(String(hcBet.away_odds)) : null;
-      const hcDrawOdds = hcBet.draw_odds ? parseFloat(String(hcBet.draw_odds)) : null;
-
-      // 소수점(.5) 핸디캡은 무(push) 불가
-      const isHalfLine = hcVal != null && !Number.isInteger(hcVal);
-      if (isHalfLine && (result.handicap_draw_pct ?? 0) > 0) {
-        console.log(`[Analyze] 소수 핸디(${hcVal}) → handicap_draw_pct 0 강제`);
-        result.handicap_draw_pct = 0;
-      }
-      const hcDraw = result.handicap_draw_pct ?? 0;
-
-      // 배당 역산 확률 (vig 제거) — 시장가가 가장 신뢰할 수 있는 기준선
-      let impliedHome: number | null = null;
-      if (hcHomeOdds && hcAwayOdds) {
-        const inv = 1 / hcHomeOdds + 1 / hcAwayOdds + (hcDrawOdds ? 1 / hcDrawOdds : 0);
-        impliedHome = clampPct(100 / (hcHomeOdds * inv));
-      }
-
-      if (hcVal != null && impliedHome != null) {
-        const aiHome = clampPct(result.handicap_home_pct);
-        const dirOk = hcVal > 0 ? aiHome >= homeWin : aiHome <= homeWin;
-        // AI 값이 배당 역산과 20%p 이상 어긋나거나 방향이 반대면 배당 기준으로 교정
-        if (!dirOk || Math.abs(aiHome - impliedHome) > 20) {
-          const newHome = impliedHome;
-          const newAway = clampPct(100 - hcDraw - newHome);
-          console.log(`[Analyze] 핸디 교정(H${hcVal > 0 ? '+' : ''}${hcVal}): 홈 ${aiHome}%→${newHome}%, 원정 ${result.handicap_away_pct}%→${newAway}% (배당역산 기준)`);
-          result.handicap_home_pct = newHome;
-          result.handicap_away_pct = newAway;
-        }
-      }
-    }
-
-    // (d) 언더오버 ↔ 핸디캡 합계 100% 보정
-    if (result.under_pct != null && result.over_pct != null) {
-      const t = result.under_pct + result.over_pct;
-      if (t !== 100) result.over_pct = clampPct(100 - result.under_pct);
-    }
-    if (result.handicap_home_pct != null && result.handicap_away_pct != null) {
-      const t = result.handicap_home_pct + (result.handicap_draw_pct ?? 0) + result.handicap_away_pct;
-      if (t !== 100) result.handicap_away_pct = clampPct(100 - result.handicap_home_pct - (result.handicap_draw_pct ?? 0));
-    }
-
 
     await saveAnalysis(match.id, result);
 
@@ -560,6 +510,11 @@ ${sportRulesSection}
 
 아래 JSON 형식으로만 응답해 (마크다운 없이, 순수 JSON만):
 {
+  "score_distribution": [
+    { "home": 2, "away": 1, "prob": 15 },
+    { "home": 1, "away": 0, "prob": 12 },
+    { "home": 1, "away": 1, "prob": 11 }
+  ],
   "winner": "예상 승리팀 이름 또는 '무승부'",
   "winner_team": "home 또는 away 또는 draw",
   "home_win_pct": 홈팀_승리확률_정수,
@@ -610,11 +565,27 @@ ${sportSpecificFields}
 - 한국어로 작성
 - JSON 외에 다른 텍스트 절대 포함 금지
 
-[확률 산출 절차 — 반드시 이 순서를 따를 것]
-1단계: 제공된 데이터(선발투수/최근폼/상대전적/결장자)와 배당률을 종합해 가장 가능성 높은 최종 스코어를 정한다.
-2단계: 그 스코어를 중심으로 "점수차 분포"를 머릿속에 그린다. (예: 1점차 35%, 2점차 25%, 3점차 이상 20%, ...)
-3단계: 각 베팅 유형의 확률을 그 분포에서 역산한다. 유형별로 따로 추측하지 말 것.
-4단계: 아래 수학적 관계가 모두 성립하는지 검산한다. 하나라도 깨지면 1단계로 돌아가 다시 계산한다.
+[★ 가장 중요 — 분석 절차는 반드시 이 순서를 따를 것]
+
+1단계: 제공된 실제 데이터를 빠짐없이 검토한다.
+   - 선발 라인업/선발투수와 그 성적
+   - 부상자·결장자 명단과 그 선수가 전력에서 차지하는 비중
+   - 상대전적(H2H) 과 최근 경기 폼
+   - 배당률이 말하는 시장의 판단
+   데이터가 없는 항목은 "없음"으로 명시하고, 있는 척 지어내지 말 것.
+
+2단계: 1단계를 종합해 "각 스코어가 나올 확률"을 score_distribution 으로 적는다.
+   - 가능성 높은 스코어 8~14개를 확률과 함께 나열한다
+   - 확률 합계는 100 (나머지 꼬리 확률은 비슷한 스코어에 흡수시킬 것)
+   - 이것이 이 분석의 핵심 결과물이다. 여기에 모든 판단을 담아라.
+
+3단계: 승무패/핸디캡/언더오버/홀짝/마진 확률은 **절대 직접 쓰지 말 것.**
+   시스템이 score_distribution 에서 기계적으로 계산한다.
+   따로 적으면 무시되므로 분포를 정확히 만드는 데만 집중하라.
+
+4단계: 분포가 1단계 데이터와 어긋나지 않는지 검산한다.
+   예) 주전 공격수 2명이 결장인데 3골 이상 스코어에 높은 확률을 주지 않았는가?
+       선발투수 ERA가 1점대인데 대량 실점 스코어가 과하지 않은가?
 
 [유형 간 수학적 관계 — 절대 위반 금지]
 ★ 핵심: 핸디캡과 마진은 승무패 결과를 더 좁게 자른 "부분집합"이다.
@@ -647,11 +618,13 @@ ${sportSpecificFields}
    - 분석 근거가 뚜렷하지 않으면 배당 역산값에서 ±10%p 이내로만 조정할 것
 
 규칙 요약:
-- home_win_pct + draw_pct + away_win_pct = 100
-- handicap_home_pct + handicap_draw_pct + handicap_away_pct = 100
-- margin_home_pct + margin_mid_pct + margin_away_pct = 100
-- under_pct + over_pct = 100 / odd_pct + even_pct = 100
-- ht_* 항목들도 각각 합계 100
+- score_distribution 의 prob 합계 = 100 (가장 중요)
+- score_distribution 은 8~14개 스코어를 담을 것. 3~4개만 쓰면 확률이 왜곡된다
+- home/away 는 0 이상의 정수. 종목에 맞는 현실적인 점수대를 쓸 것
+  (축구 0~5 / 야구 0~12 / 농구 60~130 / 배구는 세트 총득점 기준 60~110)
+- 무승부가 없는 종목(야구·농구·배구)은 동점 스코어를 넣지 말 것
+- *_pct 항목들은 시스템이 분포에서 계산하므로 적지 않아도 된다
+- ht_* 전반 항목은 분포로 계산되지 않으므로 직접 추정해 적을 것 (각 합계 100)
 
 [전력 분석 규칙]
 - 제공된 공식 데이터(선발투수 성적/결장자/최근폼/상대전적)를 최우선 근거로 삼을 것

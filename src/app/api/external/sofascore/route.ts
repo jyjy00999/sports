@@ -135,7 +135,14 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const homeEn = searchParams.get('home') ?? '';
   const awayEn = searchParams.get('away') ?? '';
-  const sport = searchParams.get('sport') === 'baseball' ? 'baseball' : 'football';
+  // Sofascore 종목 슬러그 매핑 (앱의 종목키 → Sofascore slug)
+  const SPORT_SLUG: Record<string, string> = {
+    soccer: 'football', football: 'football',
+    baseball: 'baseball',
+    basketball: 'basketball',
+    volleyball: 'volleyball',
+  };
+  const sport = SPORT_SLUG[searchParams.get('sport') ?? ''] ?? 'football';
 
   if (!homeEn || !awayEn) {
     return NextResponse.json({ error: 'home, away 파라미터 필요' }, { status: 400 });
@@ -144,10 +151,9 @@ export async function GET(req: Request) {
   console.log(`[Sofascore] 검색: ${homeEn} vs ${awayEn} (${sport})`);
 
   // 두 팀 ID 병렬 검색
-  const sofaSport = sport === 'baseball' ? 'baseball' : 'football';
   const [homeId, awayId] = await Promise.all([
-    searchTeamId(homeEn, sofaSport),
-    searchTeamId(awayEn, sofaSport),
+    searchTeamId(homeEn, sport),
+    searchTeamId(awayEn, sport),
   ]);
 
   if (!homeId || !awayId) {

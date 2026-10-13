@@ -138,6 +138,16 @@ export interface AIAnalysis {
   verdict: string;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   // 전체 베팅 유형 확률
+  /** AI가 예측한 스코어 분포 — 모든 유형 확률의 원천 */
+  score_distribution?: Array<{ home: number; away: number; prob: number }>;
+  /** 예상 스코어가 각 유형에서 가리키는 항목 */
+  implied?: {
+    match_winner: 'home' | 'draw' | 'away';
+    handicap: 'home' | 'draw' | 'away' | null;
+    under_over: 'under' | 'over' | null;
+    sum: 'odd' | 'even';
+    margin: 'home' | 'mid' | 'away' | null;
+  };
   margin_home_pct?: number | null;   // 승1패/승5패 — 승 (임계값+1 점차 이상 승리)
   margin_mid_pct?: number | null;    // 승1패/승5패 — 가운데 (임계값 이내, 무승부 포함)
   margin_away_pct?: number | null;   // 승1패/승5패 — 패 (임계값+1 점차 이상 패배)
