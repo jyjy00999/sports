@@ -9,7 +9,7 @@
 export const maxDuration = 120;
 import { NextResponse } from 'next/server';
 import { detectSport, parseLineNumber, parseHandicapValue, buildSportRulesPrompt, parseMarginThreshold, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
-import { deriveMarkets, type ScoreProb } from '@/lib/score-model';
+import { deriveMarkets, rankOptions, type ScoreProb } from '@/lib/score-model';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { getCachedAnalysis, saveAnalysis, getMatchAbsences } from '@/lib/supabase';
@@ -297,6 +297,24 @@ export async function POST(req: Request) {
       }
       // 예상 스코어가 각 유형에서 가리키는 항목 (UI에서 '예상' 배지로 표시)
       result.implied = derived.implied;
+
+      // ── 추천도 분포에서 계산 ────────────────────────────────
+      // 기존에는 AI가 자유롭게 써서 예상 스코어와 모순될 수 있었다
+      // (예: 예상 1-0 인데 추천은 핸디캡 원정승)
+      const ranked = rankOptions(derived, betCombos as unknown as Parameters<typeof rankOptions>[1]);
+      if (ranked.length > 0) {
+        const top = ranked[0];
+        const prevType = result.best_bet_type;
+        const prevOpt = result.best_bet_option;
+        result.best_bet_type = top.betType;
+        result.best_bet_option = `${top.label}${top.typeLabel ? ` (${top.typeLabel})` : ''}`;
+        result.best_bet_reason =
+          `예상 스코어 ${derived.expected_score} 기준, 발매된 항목 중 적중 확률이 ${top.pct}%로 가장 높다` +
+          `${top.isExpected ? ' (예상 스코어와도 일치)' : ''}. 배당 ${top.odds}.`;
+        if (prevType !== top.betType || prevOpt !== result.best_bet_option) {
+          console.log(`[Analyze] 추천 교정: "${prevOpt ?? '-'}"(${prevType ?? '-'}) → "${result.best_bet_option}"(${top.betType}) ${top.pct}%`);
+        }
+      }
     } else {
       // 분포가 없을 때만 최소 보정 (구 모델 응답 대비)
       console.warn('[Analyze] score_distribution 없음 → AI가 적은 확률을 그대로 사용');

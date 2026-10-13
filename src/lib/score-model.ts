@@ -198,3 +198,86 @@ export function deriveMarkets(
     },
   };
 }
+
+// ── 베팅 항목 순위 산출 (추천 선정용) ──────────────────────────
+
+export interface RankedOption {
+  betType: string;
+  /** 표시용 라벨 (예: '언더', '홈 승', '1점차 이내') */
+  label: string;
+  /** 유형 설명 (예: '언더오버 U/O 2.5') */
+  typeLabel: string;
+  pct: number;
+  odds: number;
+  /** 예상 스코어가 이 항목을 가리키는가 */
+  isExpected: boolean;
+}
+
+interface ComboLike {
+  bet_type: string;
+  bet_label?: string;
+  line_value?: string | null;
+  home_odds?: number | null;
+  draw_odds?: number | null;
+  away_odds?: number | null;
+  under_odds?: number | null;
+  over_odds?: number | null;
+  odd_odds?: number | null;
+  even_odds?: number | null;
+}
+
+/**
+ * 실제 발매된 베팅 조합들에 대해 확률 순위를 매긴다.
+ * 배당이 없는 항목(걸 수 없는 칸)은 제외한다.
+ * 정렬: 확률 내림차순 -> 예상 스코어 일치 -> 배당 낮은 순
+ */
+export function rankOptions(d: DerivedMarkets, combos: ComboLike[]): RankedOption[] {
+  const out: RankedOption[] = [];
+  const push = (
+    betType: string, typeLabel: string, label: string,
+    pct: number, odds: number | null | undefined, isExpected: boolean,
+  ) => {
+    if (odds == null || !Number.isFinite(odds) || odds <= 0) return;
+    if (!Number.isFinite(pct) || pct <= 0) return;
+    out.push({ betType, label, typeLabel, pct, odds, isExpected });
+  };
+
+  for (const c of combos) {
+    const tl = c.bet_label ?? c.bet_type;
+    switch (c.bet_type) {
+      case 'match_winner':
+        push(c.bet_type, tl, '홈 승', d.home_win_pct, c.home_odds, d.implied.match_winner === 'home');
+        push(c.bet_type, tl, '무승부', d.draw_pct, c.draw_odds, d.implied.match_winner === 'draw');
+        push(c.bet_type, tl, '원정 승', d.away_win_pct, c.away_odds, d.implied.match_winner === 'away');
+        break;
+      case 'handicap':
+        push(c.bet_type, tl, '핸디 홈 승', d.handicap_home_pct, c.home_odds, d.implied.handicap === 'home');
+        push(c.bet_type, tl, '핸디 무', d.handicap_draw_pct, c.draw_odds, d.implied.handicap === 'draw');
+        push(c.bet_type, tl, '핸디 원정 승', d.handicap_away_pct, c.away_odds, d.implied.handicap === 'away');
+        break;
+      case 'margin': {
+        const t = parseInt((c.line_value ?? '').match(/승\s*(\d+)\s*패/)?.[1] ?? '1', 10);
+        push(c.bet_type, tl, `${t + 1}점차+ 홈 승`, d.margin_home_pct, c.home_odds, d.implied.margin === 'home');
+        push(c.bet_type, tl, `${t}점차 이내`, d.margin_mid_pct, c.draw_odds, d.implied.margin === 'mid');
+        push(c.bet_type, tl, `${t + 1}점차+ 원정 승`, d.margin_away_pct, c.away_odds, d.implied.margin === 'away');
+        break;
+      }
+      case 'under_over':
+        push(c.bet_type, tl, '언더', d.under_pct, c.under_odds, d.implied.under_over === 'under');
+        push(c.bet_type, tl, '오버', d.over_pct, c.over_odds, d.implied.under_over === 'over');
+        break;
+      case 'sum':
+        push(c.bet_type, tl, '홀', d.odd_pct, c.odd_odds, d.implied.sum === 'odd');
+        push(c.bet_type, tl, '짝', d.even_pct, c.even_odds, d.implied.sum === 'even');
+        break;
+      // 전반(ht_*)은 분포로 계산되지 않으므로 추천 후보에서 제외
+    }
+  }
+
+  out.sort((a, b) => {
+    if (b.pct !== a.pct) return b.pct - a.pct;
+    if (a.isExpected !== b.isExpected) return a.isExpected ? -1 : 1;
+    return a.odds - b.odds;
+  });
+  return out;
+}
