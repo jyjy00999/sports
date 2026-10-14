@@ -499,6 +499,10 @@ type MatchAnalysis = {
   home_win_pct: number; draw_pct: number; away_win_pct: number;
   expected_score?: string;
   handicap_home_pct?: number; handicap_draw_pct?: number; handicap_away_pct?: number;
+  // 팀 식별 (AI가 팀명으로 판단)
+  home_country?: string | null; away_country?: string | null;
+  home_league?: string | null;  away_league?: string | null;
+  league_guess?: string | null; team_knowledge?: string | null;
   /** AI가 예측한 스코어 분포 */
   score_distribution?: Array<{ home: number; away: number; prob: number }>;
   /** 예상 스코어가 각 유형에서 가리키는 항목 */
@@ -1017,6 +1021,36 @@ function SoccerDetailPanel({
   const C = useC();
   return (
     <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+      {/* 팀 소속 (국가 / 리그 / 대회) */}
+      {(analysis.home_country || analysis.away_country || analysis.league_guess) && (
+        <div style={{ background: C.surface2, borderRadius: 8, padding: '10px 12px' }}>
+          {analysis.league_guess && (
+            <p style={{ fontSize: 11, fontWeight: 800, color: C.accent, marginBottom: 8 }}>
+              🏆 {analysis.league_guess}
+            </p>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 800, color: C.text, marginBottom: 2 }}>🏠 {homeName}</p>
+              <p style={{ fontSize: 11, color: C.muted }}>
+                {[analysis.home_country, analysis.home_league].filter(Boolean).join(' · ') || '소속 미확인'}
+              </p>
+            </div>
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 800, color: C.text, marginBottom: 2 }}>✈️ {awayName}</p>
+              <p style={{ fontSize: 11, color: C.muted }}>
+                {[analysis.away_country, analysis.away_league].filter(Boolean).join(' · ') || '소속 미확인'}
+              </p>
+            </div>
+          </div>
+          {analysis.team_knowledge && (
+            <p style={{ fontSize: 12, color: C.text, lineHeight: 1.6, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+              {analysis.team_knowledge}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* 예상 스코어 */}
       {analysis.expected_score && (
@@ -1709,6 +1743,11 @@ function MatchBetmanRow({
         }}>
           <span style={{ fontSize: 16, flexShrink: 0 }}>💡</span>
           <div style={{ flex: 1, minWidth: 0 }}>
+            {analysis.league_guess && (
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.muted, marginRight: 8 }}>
+                🏆 {analysis.league_guess}
+              </span>
+            )}
             {analysis.best_bet_option && (
               <span style={{ fontSize: 11, fontWeight: 800, color: C.blue, marginRight: 8 }}>
                 AI 추천: {analysis.best_bet_option}

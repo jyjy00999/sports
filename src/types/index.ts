@@ -138,6 +138,13 @@ export interface AIAnalysis {
   verdict: string;
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   // 전체 베팅 유형 확률
+  // ── 팀 식별 (AI가 팀명으로 판단) ──
+  home_country?: string | null;
+  away_country?: string | null;
+  home_league?: string | null;
+  away_league?: string | null;
+  league_guess?: string | null;
+  team_knowledge?: string | null;
   /** AI가 예측한 스코어 분포 — 모든 유형 확률의 원천 */
   score_distribution?: Array<{ home: number; away: number; prob: number }>;
   /** 예상 스코어가 각 유형에서 가리키는 항목 */

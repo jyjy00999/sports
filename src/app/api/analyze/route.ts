@@ -8,7 +8,7 @@
  */
 export const maxDuration = 120;
 import { NextResponse } from 'next/server';
-import { detectSport, parseLineNumber, parseHandicapValue, buildSportRulesPrompt, parseMarginThreshold, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
+import { detectSport, parseLineNumber, parseHandicapValue, buildSportRulesPrompt, parseMarginThreshold, describeTeamOrigin, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
 import { deriveMarkets, rankOptions, type ScoreProb } from '@/lib/score-model';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
@@ -261,6 +261,13 @@ export async function POST(req: Request) {
 
     const betCombos = (match as unknown as { bet_combos?: BetCombo[] }).bet_combos ?? [];
     const prompt = buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pitchers, injuries, sofascore, sportKey });
+    {
+      const oi = prompt.indexOf('### 팀 소속');
+      if (oi >= 0) {
+        const seg = prompt.slice(oi, oi + 260).split('\n').slice(1, 3).join(' | ');
+        console.log('[Analyze] 팀 소속 확인:', seg);
+      }
+    }
 
     const raw = await callAI(prompt);
 
@@ -460,6 +467,20 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
     extInjurySection = `\n## 공식 부상/결장자 [출처: ${src}]\n홈팀 (${homeName}):\n${fmt(injuries.home as Record<string,unknown>|null)}\n원정팀 (${awayName}):\n${fmt(injuries.away as Record<string,unknown>|null)}`;
   }
 
+  // ── 팀명 접두사로 확인된 국가 정보 ───────────────────────────
+  // 젠토토가 붙인 한 글자 국가 코드(U=UAE, J=요르단 …)는 추측이 아닌 확정 정보다
+  const originLines = [
+    describeTeamOrigin('홈팀', homeName),
+    describeTeamOrigin('원정팀', awayName),
+  ].filter(Boolean) as string[];
+  const originSection = originLines.length > 0
+    ? [
+        '### 팀 소속 (팀명 표기로 확인됨)',
+        ...originLines,
+        '→ 두 팀 국가가 다르면 국제대회다. 아래 0단계에서 대회명을 판단할 것.',
+      ].join('\n')
+    : '※ 리그·국가 정보는 수집되지 않았다. 아래 0단계에서 네가 직접 식별할 것.';
+
   // ── 종목별 공식 규정 섹션 ──────────────────────────────────
   const uoCombo = betCombos.find(c => c.bet_type === 'under_over');
   const hcCombo = betCombos.find(c => c.bet_type === 'handicap');
@@ -507,8 +528,9 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
   return `당신은 전문 스포츠 애널리스트입니다. 아래의 실제 공식 데이터를 반드시 분석에 활용하세요. 추측이나 추정으로 채우지 말고, 제공된 데이터만을 근거로 분석하세요.
 
 ## 경기 정보
-리그: ${leagueName}
+종목: ${leagueName} (${SPORT_RULES[sportKey].name})
 경기: ${homeName} vs ${awayName}
+${originSection}
 일정: ${new Date(match.match_date).toLocaleString('ko-KR')}
 ${match.venue ? `장소: ${match.venue}` : ''}
 ${match.betman_round ? `배트맨 회차: ${match.betman_round} (${match.betman_game_no}번 경기)` : ''}
@@ -543,6 +565,12 @@ ${sportRulesSection}
 
 아래 JSON 형식으로만 응답해 (마크다운 없이, 순수 JSON만):
 {
+  "home_country": "홈팀 소속 국가 (예: 일본). 모르면 \"불명\"",
+  "away_country": "원정팀 소속 국가",
+  "home_league": "홈팀 소속 리그 (예: J1리그). 모르면 \"불명\"",
+  "away_league": "원정팀 소속 리그",
+  "league_guess": "이 경기가 치러지는 대회명 (예: AFC 챔피언스리그 엘리트, MLB 정규시즌)",
+  "team_knowledge": "두 팀에 대해 아는 내용 2~3문장 (리그 내 위치/전력/스타일). 모르면 \"해당 팀 정보 미확인\"",
   "score_distribution": [
     { "home": 2, "away": 1, "prob": 15 },
     { "home": 1, "away": 0, "prob": 12 },
@@ -599,6 +627,27 @@ ${sportSpecificFields}
 - JSON 외에 다른 텍스트 절대 포함 금지
 
 [★ 가장 중요 — 분석 절차는 반드시 이 순서를 따를 것]
+
+0단계: 두 팀이 어느 나라·어느 리그 소속인지 먼저 식별한다.
+   - 팀명으로 정확히 판단하라. 예: 가시마 앤틀러스=일본 J1리그, 꽁안 하노이=베트남 V리그1,
+     상하이 하이강=중국 슈퍼리그, 탬파베이 레이스=미국 MLB, 흥국생명=한국 V-리그 여자부
+   - ★ 두 팀이 같은 리그라고 섣불리 단정하지 마라. 배트맨은 국제대회를 자주 발매한다.
+     한쪽만 아는 팀이면 다른 쪽은 십중팔구 다른 나라 팀이다. 모르면 "불명"이라고 적어라.
+     예) 포트FC=태국, 부리람 유나이티드=태국, 조호르 다룰탁짐=말레이시아,
+         꽁안 하노이=베트남, 상하이 하이강/베이징 궈안=중국, 이스트 벵골=인도,
+         알쇼르타=이라크, 알시브=오만 — 이들이 일본/한국 팀과 붙으면 AFC 대회다.
+   - 서로 다른 리그 소속이면 국제대회다(ACL 엘리트, ACL2, 클럽월드컵 등). 어느 대회인지 적어라.
+   - 리그 수준 차이는 승부에 큰 영향을 준다. 예를 들어 J1리그 팀과 동남아 리그 팀이
+     맞붙으면 전력 차가 크고, 원정 이동 거리·기후·잔디 적응도 변수가 된다.
+   - 식별한 내용을 home_country / away_country / league_guess 필드에 반드시 적어라.
+   - 팀을 특정할 수 없으면 해당 필드에 "불명"이라고 적고, 추측으로 지어내지 마라.
+
+0-1단계: 식별한 팀에 대해 네가 알고 있는 지식을 끌어낸다.
+   - 리그 내 위치(상위권/중위권/하위권), 최근 시즌 성적, 전력 수준
+   - 홈/원정 성향, 전술 스타일(공격적/수비적), 득점·실점 경향
+   - 다만 네 지식은 학습 시점 기준이라 최신이 아닐 수 있다.
+     아래 제공된 실제 데이터(선발투수 성적 등)와 충돌하면 실제 데이터를 우선하라.
+   - 모르는 팀이면 모른다고 밝히고 배당률을 주된 근거로 삼아라.
 
 1단계: 제공된 실제 데이터를 빠짐없이 검토한다.
    - 선발 라인업/선발투수와 그 성적

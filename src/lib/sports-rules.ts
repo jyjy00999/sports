@@ -282,3 +282,62 @@ export function buildSportRulesPrompt(sport: SportKey, opts?: {
 
   return lines.join('\n');
 }
+
+// ── 팀명 국가 접두사 해석 ──────────────────────────────────────
+// 젠토토는 이름이 겹치는 중동 클럽을 한 글자 국가 코드로 구분한다.
+//   U알와흐다(UAE) / J알파이살리(요르단) / O알나흐다(오만)
+// 반면 AC밀란·AS로마·FC댈러스처럼 2글자 이상 영문은 클럽명 일부이므로 건드리지 않는다.
+const COUNTRY_PREFIX: Record<string, string | string[]> = {
+  U: '아랍에미리트',
+  J: '요르단',
+  O: '오만',
+  Q: '카타르',
+  K: '쿠웨이트',
+  B: '바레인',
+  L: '레바논',
+  P: '팔레스타인',
+  Y: '예멘',
+  // 첫 글자가 겹쳐 단정할 수 없는 경우 후보를 모두 넘긴다
+  S: ['사우디아라비아', '시리아'],
+  I: ['이라크', '이란'],
+  T: ['타지키스탄', '투르크메니스탄'],
+};
+
+export interface TeamNameInfo {
+  /** 접두사를 떼어낸 실제 팀명 */
+  cleanName: string;
+  /** 확정된 국가명 (후보가 여럿이거나 접두사가 없으면 null) */
+  country: string | null;
+  /** 후보가 여럿일 때의 목록 */
+  candidates: string[] | null;
+}
+
+/**
+ * 팀명에서 한 글자 국가 접두사를 해석한다.
+ * 접두사가 없으면 원래 이름을 그대로 돌려준다.
+ */
+export function parseTeamName(name?: string | null): TeamNameInfo {
+  const raw = (name ?? '').trim();
+  // 한 글자 대문자 + 한글로 시작해야 접두사로 본다 (AC밀란 같은 2글자는 제외)
+  const m = raw.match(/^([A-Z])([가-힣].*)$/);
+  if (!m) return { cleanName: raw, country: null, candidates: null };
+
+  const mapped = COUNTRY_PREFIX[m[1]];
+  if (!mapped) return { cleanName: raw, country: null, candidates: null };
+
+  return Array.isArray(mapped)
+    ? { cleanName: m[2].trim(), country: null, candidates: mapped }
+    : { cleanName: m[2].trim(), country: mapped, candidates: null };
+}
+
+/** 프롬프트에 넣을 한 줄 설명 생성 */
+export function describeTeamOrigin(label: string, name?: string | null): string | null {
+  const info = parseTeamName(name);
+  if (info.country) {
+    return `${label} "${info.cleanName}" — 국가: ${info.country} (팀명 접두사로 확인됨, 추측 아님)`;
+  }
+  if (info.candidates) {
+    return `${label} "${info.cleanName}" — 국가 후보: ${info.candidates.join(' 또는 ')} (접두사로 좁혀짐. 클럽명으로 판단할 것)`;
+  }
+  return null;
+}
