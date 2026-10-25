@@ -281,3 +281,124 @@ export function rankOptions(d: DerivedMarkets, combos: ComboLike[]): RankedOptio
   });
   return out;
 }
+
+// ── 고득점 종목(농구·배구)용: 점수차 + 총점 분포 ──────────────────
+// 농구는 90~130점대라 "정확한 스코어" 8~14개로는 분포를 담을 수 없다.
+// (몇 개가 전부 한쪽으로 쏠려 승률 100% 같은 값이 나온다)
+// 대신 베팅 시장이 실제로 쓰는 두 축 — 점수차와 총점 — 을 직접 받는다.
+
+export interface MarginProb {
+  /** 홈 점수 - 원정 점수 */
+  diff: number;
+  prob: number;
+}
+export interface TotalProb {
+  /** 양팀 점수 합 */
+  total: number;
+  prob: number;
+}
+
+function normalize<T extends { prob: number }>(arr: T[]): T[] {
+  const clean = arr.filter(x => Number.isFinite(x.prob) && x.prob > 0);
+  const sum = clean.reduce((s, x) => s + x.prob, 0);
+  if (sum <= 0) return [];
+  return clean.map(x => ({ ...x, prob: (x.prob / sum) * 100 }));
+}
+
+export function deriveFromMarginTotal(
+  rawMargins: MarginProb[],
+  rawTotals: TotalProb[],
+  opts: {
+    handicapValue?: number | null;
+    totalLine?: number | null;
+    marginThreshold?: number | null;
+    hasDraw: boolean;
+  },
+): DerivedMarkets | null {
+  const margins = normalize(rawMargins.filter(m => Number.isFinite(m.diff)));
+  const totals = normalize(rawTotals.filter(t => Number.isFinite(t.total) && t.total >= 0));
+  if (margins.length === 0 || totals.length === 0) return null;
+
+  const { handicapValue, totalLine, marginThreshold, hasDraw } = opts;
+
+  let hw = 0, dr = 0, aw = 0;
+  let hcH = 0, hcD = 0, hcA = 0;
+  let mgH = 0, mgM = 0, mgA = 0;
+
+  for (const m of margins) {
+    const p = m.prob;
+    if (m.diff > 0) hw += p;
+    else if (m.diff < 0) aw += p;
+    else dr += p;
+
+    if (handicapValue != null) {
+      const adj = m.diff + handicapValue;
+      if (adj > 0) hcH += p;
+      else if (adj < 0) hcA += p;
+      else hcD += p;
+    }
+    if (marginThreshold != null) {
+      if (m.diff > marginThreshold) mgH += p;
+      else if (m.diff < -marginThreshold) mgA += p;
+      else mgM += p;
+    }
+  }
+
+  let under = 0, over = 0, odd = 0, even = 0;
+  for (const t of totals) {
+    const p = t.prob;
+    if (totalLine != null) {
+      if (t.total > totalLine) over += p;
+      else under += p;
+    }
+    if (t.total % 2 === 1) odd += p;
+    else even += p;
+  }
+
+  // 무승부가 없는 종목인데 동점이 섞이면 홈/원정에 비례 배분
+  if (!hasDraw && dr > 0) {
+    const base = hw + aw;
+    if (base > 0) { hw += dr * (hw / base); aw += dr * (aw / base); }
+    else { hw += dr / 2; aw += dr / 2; }
+    dr = 0;
+  }
+
+  const [hwR, drR, awR] = fixTo100([hw, dr, aw]);
+  const [hcHR, hcDR, hcAR] = handicapValue != null ? fixTo100([hcH, hcD, hcA]) : [0, 0, 0];
+  const [underR, overR] = totalLine != null ? fixTo100([under, over]) : [0, 0];
+  const [oddR, evenR] = fixTo100([odd, even]);
+  const [mgHR, mgMR, mgAR] = marginThreshold != null ? fixTo100([mgH, mgM, mgA]) : [0, 0, 0];
+
+  // 대표 스코어: 최빈 점수차와 최빈 총점을 조합
+  const modeM = margins.reduce((b, x) => (x.prob > b.prob ? x : b), margins[0]);
+  const modeT = totals.reduce((b, x) => (x.prob > b.prob ? x : b), totals[0]);
+  const homeScore = Math.round((modeT.total + modeM.diff) / 2);
+  const awayScore = Math.round((modeT.total - modeM.diff) / 2);
+  const repTotal = homeScore + awayScore;
+  const repDiff = homeScore - awayScore;
+
+  return {
+    home_win_pct: hwR, draw_pct: drR, away_win_pct: awR,
+    handicap_home_pct: hcHR, handicap_draw_pct: hcDR, handicap_away_pct: hcAR,
+    under_pct: underR, over_pct: overR,
+    odd_pct: oddR, even_pct: evenR,
+    margin_home_pct: mgHR, margin_mid_pct: mgMR, margin_away_pct: mgAR,
+    expected_score: `${homeScore}-${awayScore}`,
+    implied: {
+      match_winner: repDiff > 0 ? 'home' : repDiff < 0 ? 'away' : 'draw',
+      handicap: handicapValue != null
+        ? (repDiff + handicapValue > 0 ? 'home' : repDiff + handicapValue < 0 ? 'away' : 'draw')
+        : null,
+      under_over: totalLine != null ? (repTotal > totalLine ? 'over' : 'under') : null,
+      sum: repTotal % 2 === 1 ? 'odd' : 'even',
+      margin: marginThreshold != null
+        ? (repDiff > marginThreshold ? 'home' : repDiff < -marginThreshold ? 'away' : 'mid')
+        : null,
+    },
+  };
+}
+
+/** 이 종목이 점수차+총점 모델을 써야 하는가 (고득점 종목) */
+export function usesMarginTotalModel(sportKey: string): boolean {
+  return sportKey === 'basketball' || sportKey === 'volleyball';
+}

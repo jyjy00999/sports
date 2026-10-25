@@ -9,7 +9,7 @@
 export const maxDuration = 120;
 import { NextResponse } from 'next/server';
 import { detectSport, parseLineNumber, parseHandicapValue, buildSportRulesPrompt, parseMarginThreshold, describeTeamOrigin, SPORT_RULES, type SportKey } from '@/lib/sports-rules';
-import { deriveMarkets, rankOptions, type ScoreProb } from '@/lib/score-model';
+import { deriveMarkets, deriveFromMarginTotal, usesMarginTotalModel, rankOptions, type ScoreProb, type MarginProb, type TotalProb } from '@/lib/score-model';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { getCachedAnalysis, saveAnalysis, getMatchAbsences } from '@/lib/supabase';
@@ -284,18 +284,35 @@ export async function POST(req: Request) {
     const hcValue = parseHandicapValue(betCombos.find((c: BetCombo) => c.bet_type === 'handicap')?.line_value);
     const mgThreshold = parseMarginThreshold(betCombos.find((c: BetCombo) => c.bet_type === 'margin')?.line_value);
 
-    const rawDist = (result as unknown as { score_distribution?: ScoreProb[] }).score_distribution;
-    const derived = Array.isArray(rawDist) && rawDist.length > 0
-      ? deriveMarkets(rawDist, {
-          handicapValue: hcValue,
-          totalLine: uoLine,
-          marginThreshold: mgThreshold,
-          hasDraw: rule.hasDraw,
-        })
-      : null;
+    const distOpts = {
+      handicapValue: hcValue,
+      totalLine: uoLine,
+      marginThreshold: mgThreshold,
+      hasDraw: rule.hasDraw,
+    };
+    const rawAny = result as unknown as {
+      score_distribution?: ScoreProb[];
+      margin_distribution?: MarginProb[];
+      total_distribution?: TotalProb[];
+    };
+
+    // 고득점 종목(농구·배구)은 점수차+총점 분포, 그 외는 정확한 스코어 분포
+    let derived = null;
+    if (usesMarginTotalModel(sportKey)
+        && Array.isArray(rawAny.margin_distribution) && rawAny.margin_distribution.length > 0
+        && Array.isArray(rawAny.total_distribution) && rawAny.total_distribution.length > 0) {
+      derived = deriveFromMarginTotal(rawAny.margin_distribution, rawAny.total_distribution, distOpts);
+      if (derived) {
+        console.log(`[Analyze] 점수차 ${rawAny.margin_distribution.length}개 + 총점 ${rawAny.total_distribution.length}개 → 예상 ${derived.expected_score} (${rule.name})`);
+      }
+    }
+    const rawDist = rawAny.score_distribution;
+    if (!derived && Array.isArray(rawDist) && rawDist.length > 0) {
+      derived = deriveMarkets(rawDist, distOpts);
+    }
 
     if (derived) {
-      console.log(`[Analyze] 스코어 분포 ${rawDist!.length}개 → 예상 ${derived.expected_score} (${rule.name})`);
+      if (rawDist?.length) console.log(`[Analyze] 스코어 분포 ${rawDist.length}개 → 예상 ${derived.expected_score} (${rule.name})`);
       result.home_win_pct = derived.home_win_pct;
       result.draw_pct     = derived.draw_pct;
       result.away_win_pct = derived.away_win_pct;
@@ -467,6 +484,56 @@ function buildAnalysisPrompt({ match, homeAbsences, awayAbsences, betCombos, pit
     extInjurySection = `\n## 공식 부상/결장자 [출처: ${src}]\n홈팀 (${homeName}):\n${fmt(injuries.home as Record<string,unknown>|null)}\n원정팀 (${awayName}):\n${fmt(injuries.away as Record<string,unknown>|null)}`;
   }
 
+  // ── 분포 모델 안내 (종목별로 다름) ───────────────────────────
+  // 축구·야구는 득점이 낮아 '정확한 스코어' 분포가 잘 맞는다.
+  // 농구·배구는 90~240점대라 스코어 몇 개로는 분포를 담을 수 없으므로
+  // 베팅 시장이 실제로 쓰는 축인 '점수차'와 '총점'을 따로 받는다.
+  const distGuide = usesMarginTotalModel(sportKey)
+    ? [
+        '',
+        '   이 종목은 득점이 많아 정확한 스코어 대신 두 가지 분포를 적는다.',
+        '',
+        '   (1) margin_distribution — 점수차(홈 - 원정) 분포',
+        '       - diff 값을 2~3점 간격으로 12~20개 나열하고 각각의 확률을 적는다',
+        '       - 음수는 원정 우세, 양수는 홈 우세',
+        '       - ★ 농구는 20점 차 승부도 흔하다. 분포를 좁게 잡지 마라.',
+        '         배당 1.29(≈67%)인 팀의 승률이 100%로 계산되면 분포가 틀린 것이다.',
+        '       - 검산: 양수 확률의 합이 승무패 홈 배당 역산값과 ±10%p 안에 들어야 한다',
+        '',
+        '   (2) total_distribution — 양팀 총점 분포',
+        '       - total 값을 4~6점 간격으로 10~16개 나열한다',
+        '       - 언더오버 기준선 주변을 촘촘히 채워라 (한쪽으로 쏠리면 안 된다)',
+        '       - 검산: 기준선 초과 확률의 합이 오버 배당 역산값과 ±10%p 안에 들어야 한다',
+        '',
+        '   두 분포 각각 확률 합계는 100.',
+      ].join('\n')
+    : [
+        '',
+        '   score_distribution 에 "각 스코어가 나올 확률"을 적는다.',
+        '   - 가능성 높은 스코어 8~14개를 확률과 함께 나열한다',
+        '   - 확률 합계는 100 (나머지 꼬리 확률은 비슷한 스코어에 흡수시킬 것)',
+        '   - 이것이 이 분석의 핵심 결과물이다. 여기에 모든 판단을 담아라.',
+      ].join('\n');
+
+  const distSpec = usesMarginTotalModel(sportKey)
+    ? [
+        '  "margin_distribution": [',
+        '    { "diff": -12, "prob": 8 }, { "diff": -8, "prob": 12 }, { "diff": -4, "prob": 15 },',
+        '    { "diff": 0, "prob": 6 }, { "diff": 4, "prob": 14 }, { "diff": 8, "prob": 11 }',
+        '  ],',
+        '  "total_distribution": [',
+        '    { "total": 210, "prob": 8 }, { "total": 220, "prob": 14 }, { "total": 230, "prob": 18 },',
+        '    { "total": 240, "prob": 16 }, { "total": 250, "prob": 10 }',
+        '  ],',
+      ].join('\n')
+    : [
+        '  "score_distribution": [',
+        '    { "home": 2, "away": 1, "prob": 15 },',
+        '    { "home": 1, "away": 0, "prob": 12 },',
+        '    { "home": 1, "away": 1, "prob": 11 }',
+        '  ],',
+      ].join('\n');
+
   // ── 팀명 접두사로 확인된 국가 정보 ───────────────────────────
   // 젠토토가 붙인 한 글자 국가 코드(U=UAE, J=요르단 …)는 추측이 아닌 확정 정보다
   const originLines = [
@@ -571,11 +638,7 @@ ${sportRulesSection}
   "away_league": "원정팀 소속 리그",
   "league_guess": "이 경기가 치러지는 대회명 (예: AFC 챔피언스리그 엘리트, MLB 정규시즌)",
   "team_knowledge": "두 팀에 대해 아는 내용 2~3문장 (리그 내 위치/전력/스타일). 모르면 \"해당 팀 정보 미확인\"",
-  "score_distribution": [
-    { "home": 2, "away": 1, "prob": 15 },
-    { "home": 1, "away": 0, "prob": 12 },
-    { "home": 1, "away": 1, "prob": 11 }
-  ],
+${distSpec}
   "winner": "예상 승리팀 이름 또는 '무승부'",
   "winner_team": "home 또는 away 또는 draw",
   "home_win_pct": 홈팀_승리확률_정수,
@@ -659,10 +722,7 @@ ${sportSpecificFields}
      모르는 항목은 분석 글에서도 "정보 미확인"이라고 밝히고, 배당 등 다른 근거로 보완하라.
      반대로 "출처에서 확인됨"이라 적힌 항목만 사실로 단정할 수 있다.
 
-2단계: 1단계를 종합해 "각 스코어가 나올 확률"을 score_distribution 으로 적는다.
-   - 가능성 높은 스코어 8~14개를 확률과 함께 나열한다
-   - 확률 합계는 100 (나머지 꼬리 확률은 비슷한 스코어에 흡수시킬 것)
-   - 이것이 이 분석의 핵심 결과물이다. 여기에 모든 판단을 담아라.
+2단계: 1단계를 종합해 확률 분포를 만든다. ${distGuide}
 
 3단계: 승무패/핸디캡/언더오버/홀짝/마진 확률은 **절대 직접 쓰지 말 것.**
    시스템이 score_distribution 에서 기계적으로 계산한다.
