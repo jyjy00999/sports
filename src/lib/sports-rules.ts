@@ -34,7 +34,8 @@ export const SPORT_RULES: Record<SportKey, SportRule> = {
     name: '축구',
     hasDraw: true,
     timeBasis: '전반+후반(정규 90분)까지의 결과. 연장전과 승부차기는 제외',
-    halfBasis: '전반 45분 종료 시점',
+    // 승부식에는 축구 전반 상품이 없다 (전/후반 결과는 '기록식' 게임 전용)
+    halfBasis: null,
     margin: null,
     handicapUnit: '점수',
     totalUnit: '양팀 득점 합계',
@@ -62,7 +63,9 @@ export const SPORT_RULES: Record<SportKey, SportRule> = {
     name: '농구',
     hasDraw: false,
     timeBasis: '연장전을 포함한 최종 결과',
-    halfBasis: '전반(1~2쿼터) 종료 시점',
+    // 프로토 승부식 전반 상품은 야구에만 발매된다 (2025년 35회차 야구 전반 승무패,
+    // 88회차 야구 전반 핸디캡·언더오버). 농구 전반 상품은 확인되지 않음.
+    halfBasis: null,
     margin: {
       label: '승5패',
       threshold: 5,
@@ -80,6 +83,8 @@ export const SPORT_RULES: Record<SportKey, SportRule> = {
     timeBasis: '최종 결과',
     halfBasis: null,
     margin: null,
+    // 실제 발매 데이터로 확인: U/O 177.5~184.5(총득점)에 핸디캡은 H±1.5~2.5.
+    // 180점대 경기에 1.5'점' 핸디는 무의미하므로 세트 기준이 확실하다.
     handicapUnit: '세트스코어',
     totalUnit: '세트 득점이 아닌 전 세트 총 득점 합계',
     totalRange: [150.5, 220.5],
@@ -105,13 +110,21 @@ const BASEBALL_TEAM_HINTS = [
 ];
 
 // 주의: '정관장'은 배구(레드스파크스)와 농구(레드부스터스)에 모두 있으므로 구단명까지 명시
+// 실제 젠토토 표기에 맞춘 구단 키워드 (띄어쓰기 포함 형태로 검증함)
 const VOLLEYBALL_TEAM_HINTS = [
-  '흥국생명', '현대건설', 'GS칼텍스', 'IBK기업은행', '페퍼저축은행', '레드스파크스',
-  '대한항공', '우리카드', 'OK금융', '삼성화재', 'KB손해보험', '한국전력', '핑크스파이더스',
+  // 남자부
+  '대한항공', '우리카드', '현대캐피탈', 'OK저축은행', 'OK금융', '삼성화재', 'KB손해보험', '한국전력',
+  '점보스', '우리WON', '스카이워커스', '빅스톰', '블루팡스',
+  // 여자부
+  '흥국생명', '현대건설', 'GS칼텍스', 'IBK기업은행', '페퍼저축은행',
+  '핑크스파이더스', '레드스파크스', '알토스', '힐스테이트',
 ];
 const BASKETBALL_TEAM_HINTS = [
-  '레드부스터스', '스카이거너스', '썬더스', 'DB프로미', 'KT소닉붐', 'SK나이츠',
-  'KCC이지스', '가스공사 페가수스', '삼성 썬더스', '현대모비스 피버스', '엘지 세이커스',
+  // KBL (젠토토는 '수원KT 소닉붐'처럼 연고지+구단 형태로 표기하므로 구단명만 넣는다)
+  '소닉붐', '프로미', '나이츠', '세이커스', '이지스', '썬더스', '피버스',
+  '페가수스', '레드부스터스', '스카이거너스',
+  // WKBL
+  '우리은행 우리WON', '삼성생명', '신한은행', 'BNK썸', '하나원큐', '위비',
 ];
 
 /**

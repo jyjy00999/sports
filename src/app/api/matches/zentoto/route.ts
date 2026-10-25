@@ -88,6 +88,10 @@ async function findOrCreateTeam(name_kr: string, league_id: string | null) {
 // ── 타입 ──────────────────────────────────────────────────
 export type ZentotoRow = {
   no: string;
+  /** 같은 경기의 조합들이 공유하는 id (젠토토 proto-pid) */
+  parentId?: string;
+  /** 젠토토 공식 유형 코드: N/H/U/S/W1L/W5L */
+  betTypeCode?: string;
   round: string;
   datetimeRaw: string;  // "2026-09-02 (수) 03:45"
   baseName: string;     // 홈팀명 (접미사 제거)
@@ -114,6 +118,8 @@ type BetRow = {
 };
 
 type MatchGroup = {
+  /** 젠토토 proto-pid — 같은 경기의 조합을 묶는 키 */
+  parentId?: string;
   baseNo: number;
   round: string;
   matchDate: string;  // ISO
@@ -124,12 +130,36 @@ type MatchGroup = {
 
 // ── 베팅 유형 매핑 ──────────────────────────────────────────
 function makeBetRow(row: ZentotoRow): BetRow {
-  const { suffix, payW, payD, payL, no } = row;
+  const { suffix, payW, payD, payL, no, betTypeCode } = row;
   const w = parseFloat(payW) > 0 ? parseFloat(payW) : null;
   const d = parseFloat(payD) > 0 ? parseFloat(payD) : null;
   const l = parseFloat(payL) > 0 ? parseFloat(payL) : null;
   const n = parseInt(no);
 
+  // ── 젠토토 공식 유형 코드 우선 (한글 suffix 추측보다 정확) ──
+  //    N=승무패 / H=핸디캡 / U=언더오버 / S=홀짝 / W1L=승1패 / W5L=승5패
+  if (betTypeCode) {
+    const line = suffix.replace(/^\(|\)$/g, '').trim();
+    switch (betTypeCode) {
+      case 'N':
+        return { combo_no: n, type: 'match_winner', label: '승무패', line_value: null, home_odds: w, draw_odds: d, away_odds: l };
+      case 'H':
+        return { combo_no: n, type: 'handicap', label: `핸디캡 ${line}`, line_value: line, home_odds: w, draw_odds: d, away_odds: l };
+      case 'U': {
+        const uo = line.match(/U\/O\s*([\d.]+)/i);
+        const lv = uo ? `U/O ${uo[1]}` : line;
+        return { combo_no: n, type: 'under_over', label: `언더오버 ${lv}`, line_value: lv, under_odds: w, over_odds: l };
+      }
+      case 'S':
+        return { combo_no: n, type: 'sum', label: '홀/짝 SUM', line_value: null, odd_odds: w, even_odds: l };
+      case 'W1L':
+        return { combo_no: n, type: 'margin', label: '승1패', line_value: '승1패', home_odds: w, draw_odds: d, away_odds: l };
+      case 'W5L':
+        return { combo_no: n, type: 'margin', label: '승5패', line_value: '승5패', home_odds: w, draw_odds: d, away_odds: l };
+    }
+  }
+
+  // ── 코드가 없을 때만 한글 suffix로 추정 (구버전 HTML 대비) ──
   const hMatch = suffix.match(/H([+-][\d.]+)/i);
   if (hMatch) {
     return { combo_no: n, type: 'handicap', label: `핸디캡 ${hMatch[0]}`, line_value: hMatch[0], home_odds: w, draw_odds: d, away_odds: l };
@@ -159,9 +189,12 @@ function groupRows(rows: ZentotoRow[]): MatchGroup[] {
     const matchDate = new Date(dtClean.replace(' ', 'T') + ':00+09:00').toISOString();
     const betRow = makeBetRow(row);
 
-    const existing = groups.find(
-      g => g.baseName === row.baseName && g.awayName === row.awayName && g.matchDate === matchDate,
-    );
+    // 같은 경기 판별: proto-pid가 있으면 그것을 신뢰하고, 없으면 팀명+시각으로 대체
+    const existing = row.parentId
+      ? groups.find(g => g.parentId === row.parentId)
+      : groups.find(
+          g => g.baseName === row.baseName && g.awayName === row.awayName && g.matchDate === matchDate,
+        );
     if (existing) {
       // 홀/짝(sum)이 이미 등장한 이후의 콤보 = 전반 베팅
       const hasSumAlready = existing.betTypes.some(b => b.type === 'sum');
@@ -193,7 +226,7 @@ function groupRows(rows: ZentotoRow[]): MatchGroup[] {
       }
       existing.betTypes.push(betRow);
     } else {
-      groups.push({ baseNo: parseInt(row.no), round: row.round, matchDate, baseName: row.baseName, awayName: row.awayName, betTypes: [betRow] });
+      groups.push({ baseNo: parseInt(row.no), parentId: row.parentId, round: row.round, matchDate, baseName: row.baseName, awayName: row.awayName, betTypes: [betRow] });
     }
   }
   return groups;
@@ -296,9 +329,20 @@ function parseHtml(html: string): ZentotoRow[] {
     const tr = m[0];
     if (tr.includes('<th')) continue;
 
-    const noMatch = tr.match(/class="text-center"[^>]*>(\d{4,5})<\/td>/);
+    // 조합번호: 회차가 바뀌면 자릿수가 달라진다(3자리~5자리). proto-uid를 우선 사용.
+    const uidMatch = tr.match(/proto-uid="(\d+)"/);
+    const noMatch = uidMatch ?? tr.match(/class="text-center"[^>]*>(\d{2,6})<\/td>/);
     if (!noMatch) continue;
     const no = noMatch[1];
+
+    // 같은 경기의 조합들은 proto-pid를 공유한다 (팀명+시각 매칭보다 정확)
+    const pidMatch = tr.match(/proto-pid="(\d+)"/);
+    const parentId = pidMatch?.[1] ?? '';
+
+    // 젠토토가 제공하는 공식 유형 코드
+    //   N=승무패 H=핸디캡 U=언더오버 S=홀짝 W1L=승1패(야구) W5L=승5패(농구)
+    const btMatch = tr.match(/bet-type="([A-Z0-9]+)"/);
+    const betTypeCode = btMatch?.[1] ?? '';
 
     const dtMatch = tr.match(/(\d{4}-\d{2}-\d{2} \([^)]+\) \d{2}:\d{2})/);
     if (!dtMatch) continue;
@@ -329,7 +373,7 @@ function parseHtml(html: string): ZentotoRow[] {
     const betCnt = betCntM?.[1] ?? '2';
 
     if (baseName && awayName) {
-      parsed.push({ no, round, datetimeRaw, baseName, suffix, awayName, betCnt, payW, payD, payL });
+      parsed.push({ no, parentId, betTypeCode, round, datetimeRaw, baseName, suffix, awayName, betCnt, payW, payD, payL });
     }
   }
   return parsed;
